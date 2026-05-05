@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.env.local
+
+# Secrets — never commit
+secrets/
+*.secret
+*.key
+garmin_session/
+.garmin_session
+tokens.json
+
+# OS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Logs / local data dumps
+*.log
+data/
