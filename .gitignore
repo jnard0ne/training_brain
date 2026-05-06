@@ -13,6 +13,7 @@ secrets/
 *.key
 garmin_session/
 .garmin_session
+.garth/
 tokens.json
 
 # OS
