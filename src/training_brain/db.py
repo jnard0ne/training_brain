@@ -19,7 +19,7 @@ from supabase import Client, create_client
 @dataclass(frozen=True)
 class Settings:
     supabase_url: str
-    supabase_service_key: str
+    supabase_secret_key: str
     athlete_id: str
     garmin_email: str | None
     garmin_password: str | None
@@ -34,7 +34,7 @@ def settings() -> Settings:
     load_dotenv()
     return Settings(
         supabase_url=_required("SUPABASE_URL"),
-        supabase_service_key=_required("SUPABASE_SERVICE_KEY"),
+        supabase_secret_key=_required("SUPABASE_SECRET_KEY"),
         athlete_id=_required("ATHLETE_ID"),
         garmin_email=os.getenv("GARMIN_EMAIL"),
         garmin_password=os.getenv("GARMIN_PASSWORD"),
@@ -48,7 +48,7 @@ def settings() -> Settings:
 @cache
 def client() -> Client:
     s = settings()
-    return create_client(s.supabase_url, s.supabase_service_key)
+    return create_client(s.supabase_url, s.supabase_secret_key)
 
 
 def athlete_id() -> str:

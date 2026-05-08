@@ -18,7 +18,7 @@ TrainingPeaks   ──┼──►  ingestion  ──►  normalize  ──►  
 Strava          ──┘                                     + Storage (FIT files)
 ```
 
-- **Garmin** (`garth`) — activities, FIT files, sleep, HRV, RHR, body battery, stress, weight, training readiness.
+- **Garmin** (`garminconnect` + `curl_cffi`) — activities, FIT files, sleep, HRV, RHR, body battery, stress, weight, training readiness. Migrated from `garth` after Garmin's March 2026 Cloudflare changes broke its login flow.
 - **TrainingPeaks** — official iCal feed parsed for planned workouts. No public TP API exists for individuals; iCal is the stable export.
 - **Strava** (`stravalib`) — supplemental, deduped against Garmin by start time + sport.
 - **Zwift** — no direct integration; Zwift auto-syncs to Garmin and Strava.
@@ -76,7 +76,9 @@ cp .env.example .env
 # then fill in the values
 ```
 
-Required: `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `ATHLETE_ID`, `GARMIN_EMAIL`, `GARMIN_PASSWORD`, `TP_ICAL_URL`. Strava vars are optional.
+Required: `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, `ATHLETE_ID`, `GARMIN_EMAIL`, `GARMIN_PASSWORD`, `TP_ICAL_URL`. Strava vars are optional.
+
+`SUPABASE_SECRET_KEY` is the modern `sb_secret_...` key from **Project Settings → API Keys** — not the legacy `service_role` JWT.
 
 The TP iCal URL is found at TrainingPeaks under **Settings → Account Settings → Sharing → Calendar Feed**. It's tokenized — treat as secret.
 
@@ -86,7 +88,7 @@ The TP iCal URL is found at TrainingPeaks under **Settings → Account Settings 
 python -m training_brain.sync login-garmin
 ```
 
-This will prompt for MFA. The token is cached to `~/.garth/` and refreshed automatically on subsequent runs. Re-run it if cron starts complaining about a stale session.
+This will prompt for MFA. Tokens are cached to `~/.garminconnect/` and refreshed automatically on subsequent runs. Re-run it if cron starts complaining about a stale session.
 
 ### 6. Backfill history
 

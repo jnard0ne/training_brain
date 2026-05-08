@@ -1,7 +1,7 @@
-"""Garmin Connect ingestion via garth.
+"""Garmin Connect ingestion via cyberjunky/python-garminconnect.
 
 Public surface:
-    login_interactive() — first-time MFA login; cached to ~/.garth.
+    login_interactive() — first-time MFA login; cached to ~/.garminconnect.
     sync_intraday() — body battery, stress, training readiness for today.
     sync_daily(days_back) — sleep, HRV, RHR, weight, training readiness, activities.
     sync_backfill(since) — historical sweep (wellness + activities).
@@ -10,10 +10,11 @@ Garmin is the source for raw physiology and the bulk of executed-workout data.
 TP outranks Garmin if a workout is ever manually edited there, but in practice
 that diff is rare; the tradeoff is documented in CLAUDE.md.
 
-Field extractors below are based on documented Garmin Connect endpoints. Some
-shapes vary between accounts and Garmin updates; treat the first end-to-end
-run as a calibration step and extend SPORT_MAP / _extract_wellness_fields as
-real responses surface.
+Replaces the original garth-based client (deprecated 2026-03-27 after Garmin
+added Cloudflare protections). The new lib ships a native mobile-SSO auth
+engine with curl_cffi TLS impersonation and exposes a `connectapi(path)` method
+on the `Garmin` instance, so the URL paths used here are unchanged from the
+prior implementation.
 """
 
 from __future__ import annotations
@@ -22,9 +23,12 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-import garth
+from garminconnect import Garmin
 
 from training_brain.db import athlete_id, client, settings
+
+
+GARMIN_TOKEN_PATH = "~/.garminconnect"
 
 
 SPORT_MAP: dict[str, str] = {
@@ -71,32 +75,43 @@ class SyncResult:
 
 # ── Auth ────────────────────────────────────────────────────────────────────
 
+_garmin: Garmin | None = None
+
 
 def login_interactive() -> None:
-    """Run once locally. Prompts for MFA if Garmin asks. Token cached to ~/.garth."""
+    """Run once locally. Prompts for MFA if Garmin asks. Tokens cached to ~/.garminconnect."""
     s = settings()
     if not (s.garmin_email and s.garmin_password):
         raise RuntimeError("GARMIN_EMAIL / GARMIN_PASSWORD must be set in .env")
-    garth.login(s.garmin_email, s.garmin_password)
-    garth.save("~/.garth")
+    api = Garmin(
+        email=s.garmin_email,
+        password=s.garmin_password,
+        prompt_mfa=lambda: input("Garmin MFA code: ").strip(),
+    )
+    api.login(GARMIN_TOKEN_PATH)
 
 
-def _ensure_session() -> None:
+def _client_garmin() -> Garmin:
+    global _garmin
+    if _garmin is not None:
+        return _garmin
+    api = Garmin()
     try:
-        garth.resume("~/.garth")
-        _ = garth.client.username
+        api.login(GARMIN_TOKEN_PATH)
     except Exception as e:
         raise RuntimeError(
             "Garmin session is stale or missing. Run "
             "`python -m training_brain.sync login-garmin` interactively first."
         ) from e
+    _garmin = api
+    return api
 
 
 # ── Sync entry points ───────────────────────────────────────────────────────
 
 
 def sync_intraday() -> SyncResult:
-    _ensure_session()
+    _client_garmin()
     result = SyncResult(profile="intraday")
     try:
         _ingest_wellness_day(date.today(), intraday=True)
@@ -107,7 +122,7 @@ def sync_intraday() -> SyncResult:
 
 
 def sync_daily(days_back: int = 1) -> SyncResult:
-    _ensure_session()
+    _client_garmin()
     result = SyncResult(profile="daily")
     today = date.today()
     for offset in range(days_back + 1):
@@ -128,7 +143,7 @@ def sync_daily(days_back: int = 1) -> SyncResult:
 
 
 def sync_backfill(since: date) -> SyncResult:
-    _ensure_session()
+    _client_garmin()
     result = SyncResult(profile="backfill")
     today = date.today()
     cur = since
@@ -202,48 +217,38 @@ def _ingest_wellness_day(d: date, *, intraday: bool) -> None:
 
 def _fetch_wellness(kind: str, d: date) -> dict | list | None:
     iso = d.isoformat()
+    api = _client_garmin()
     if kind == "sleep":
-        try:
-            rows = garth.DailySleep.list(end=iso, period=1)
-            return _first_or_none(rows)
-        except Exception:
-            return garth.client.connectapi(
-                f"/wellness-service/wellness/dailySleepData/{iso}"
-            )
+        # get_sleep_data returns { dailySleepDTO: {...}, sleepLevels: [...], ... }.
+        return api.get_sleep_data(iso)
     if kind == "hrv":
-        return garth.client.connectapi(f"/hrv-service/hrv/{iso}")
+        return api.get_hrv_data(iso)
     if kind == "rhr":
-        return garth.client.connectapi(
-            f"/usersummary-service/usersummary/daily/{iso}"
-        )
+        # get_user_summary surfaces restingHeartRate alongside steps/calories etc.
+        return api.get_user_summary(iso)
     if kind == "body_battery":
-        return garth.client.connectapi(
-            f"/wellness-service/wellness/dailyStress/{iso}"
-        )
+        # Returns a list (one entry per day) with charged/drained + values array.
+        return api.get_body_battery(iso)
     if kind == "stress":
-        return garth.client.connectapi(
-            f"/wellness-service/wellness/dailyStress/{iso}"
-        )
+        return api.get_stress_data(iso)
     if kind == "training_readiness":
-        return garth.client.connectapi(
-            f"/metrics-service/metrics/trainingreadiness/{iso}"
-        )
+        return api.connectapi(f"/metrics-service/metrics/trainingreadiness/{iso}")
     if kind == "weight":
-        return garth.client.connectapi(
-            f"/weight-service/weight/dayview/{iso}?includeAll=true"
-        )
+        return api.connectapi(f"/weight-service/weight/dayview/{iso}?includeAll=true")
     raise ValueError(f"Unknown wellness kind: {kind}")
 
 
 def _extract_wellness_fields(kind: str, raw: Any) -> dict[str, Any]:
     out: dict[str, Any] = {}
     if kind == "sleep" and isinstance(raw, dict):
-        out["sleep_total_s"] = raw.get("sleepTimeSeconds")
-        out["sleep_deep_s"] = raw.get("deepSleepSeconds")
-        out["sleep_light_s"] = raw.get("lightSleepSeconds")
-        out["sleep_rem_s"] = raw.get("remSleepSeconds")
-        out["sleep_awake_s"] = raw.get("awakeSleepSeconds")
-        scores = raw.get("sleepScores")
+        # New endpoint nests the daily numbers under dailySleepDTO.
+        sleep = raw.get("dailySleepDTO") or raw
+        out["sleep_total_s"] = sleep.get("sleepTimeSeconds")
+        out["sleep_deep_s"] = sleep.get("deepSleepSeconds")
+        out["sleep_light_s"] = sleep.get("lightSleepSeconds")
+        out["sleep_rem_s"] = sleep.get("remSleepSeconds")
+        out["sleep_awake_s"] = sleep.get("awakeSleepSeconds")
+        scores = sleep.get("sleepScores")
         if isinstance(scores, dict):
             overall = scores.get("overall")
             if isinstance(overall, dict):
@@ -258,11 +263,26 @@ def _extract_wellness_fields(kind: str, raw: Any) -> dict[str, Any]:
             out["hrv_baseline_ms"] = baseline.get("balancedLow") or baseline.get("lowUpper")
     elif kind == "rhr" and isinstance(raw, dict):
         out["rhr_bpm"] = raw.get("restingHeartRate")
-    elif kind == "body_battery" and isinstance(raw, dict):
-        out["body_battery_high"] = raw.get("bodyBatteryHighestValue") or raw.get("bodyBatteryHighValue")
-        out["body_battery_low"] = raw.get("bodyBatteryLowestValue") or raw.get("bodyBatteryLowValue")
-        out["body_battery_charged"] = raw.get("bodyBatteryChargedValue")
-        out["body_battery_drained"] = raw.get("bodyBatteryDrainedValue")
+    elif kind == "body_battery":
+        # get_body_battery returns a list with one entry per day requested.
+        day = raw[0] if isinstance(raw, list) and raw else raw if isinstance(raw, dict) else None
+        if isinstance(day, dict):
+            out["body_battery_charged"] = _int_or_none(day.get("charged"))
+            out["body_battery_drained"] = _int_or_none(day.get("drained"))
+            values = day.get("bodyBatteryValuesArray") or []
+            # Entry shape varies by endpoint:
+            #   get_body_battery: [timestamp_ms, value]            (len 2)
+            #   /dailyStress:     [timestamp_ms, status, value, version] (len 4)
+            nums: list[float] = []
+            for v in values:
+                if not isinstance(v, list) or len(v) < 2:
+                    continue
+                candidate = v[2] if len(v) >= 3 and isinstance(v[2], (int, float)) else v[1]
+                if isinstance(candidate, (int, float)):
+                    nums.append(candidate)
+            if nums:
+                out["body_battery_high"] = int(max(nums))
+                out["body_battery_low"] = int(min(nums))
     elif kind == "stress" and isinstance(raw, dict):
         out["stress_avg"] = raw.get("avgStressLevel")
         out["stress_max"] = raw.get("maxStressLevel")
@@ -322,13 +342,14 @@ def _list_activities(start: date, end: date) -> list[dict]:
     out: list[dict] = []
     limit = 100
     offset = 0
+    api = _client_garmin()
     while True:
         path = (
             f"/activitylist-service/activities/search/activities"
             f"?limit={limit}&start={offset}"
             f"&startDate={start.isoformat()}&endDate={end.isoformat()}"
         )
-        chunk = garth.client.connectapi(path) or []
+        chunk = api.connectapi(path) or []
         if not chunk:
             break
         out.extend(chunk)
@@ -339,12 +360,11 @@ def _list_activities(start: date, end: date) -> list[dict]:
 
 
 def _store_fit_file(activity_id: int, aid: str) -> str:
-    raw = garth.client.connectapi(
-        f"/download-service/files/activity/{activity_id}",
-        api=False,
+    data = _client_garmin().download_activity(
+        str(activity_id),
+        dl_fmt=Garmin.ActivityDownloadFormat.ORIGINAL,
     )
-    data = raw if isinstance(raw, (bytes, bytearray)) else getattr(raw, "content", None)
-    if data is None:
+    if not data:
         raise RuntimeError(f"FIT download for {activity_id} returned no bytes")
     path = f"{aid}/{activity_id}.zip"
     client().storage.from_("fit-files").upload(
@@ -366,20 +386,29 @@ def _normalize_activity(raw: dict, fit_path: str | None) -> dict[str, Any]:
         "garmin_activity_id": raw.get("activityId"),
         "started_at": _normalize_ts(started_at),
         "sport": sport,
-        "duration_s": int(raw.get("duration") or 0),
+        "duration_s": _int_or_none(raw.get("duration")) or 0,
         "distance_m": raw.get("distance"),
         "tss": raw.get("trainingStressScore"),
         "intensity_factor": raw.get("intensityFactor"),
-        "avg_hr": raw.get("averageHR"),
-        "max_hr": raw.get("maxHR"),
-        "avg_power": raw.get("avgPower"),
-        "normalized_power": raw.get("normPower"),
-        "avg_cadence": int(cadence) if cadence else None,
+        "avg_hr": _int_or_none(raw.get("averageHR")),
+        "max_hr": _int_or_none(raw.get("maxHR")),
+        "avg_power": _int_or_none(raw.get("avgPower")),
+        "normalized_power": _int_or_none(raw.get("normPower")),
+        "avg_cadence": _int_or_none(cadence),
         "avg_pace_s_per_km": _avg_pace(raw),
         "elevation_gain_m": raw.get("elevationGain"),
-        "calories": raw.get("calories"),
+        "calories": _int_or_none(raw.get("calories")),
         "fit_file_path": fit_path,
     }
+
+
+def _int_or_none(x: Any) -> int | None:
+    if x is None:
+        return None
+    try:
+        return int(round(float(x)))
+    except (TypeError, ValueError):
+        return None
 
 
 def _normalize_ts(ts: str | None) -> str | None:
@@ -401,11 +430,3 @@ def _avg_pace(raw: dict) -> float | None:
 def _activity_date(raw: dict) -> str:
     ts = raw.get("startTimeGMT") or raw.get("startTimeLocal") or ""
     return ts[:10] or date.today().isoformat()
-
-
-def _first_or_none(rows: Any) -> dict | None:
-    if not rows:
-        return None
-    if isinstance(rows, list):
-        return rows[0] if rows else None
-    return rows

@@ -14,7 +14,11 @@ secrets/
 garmin_session/
 .garmin_session
 .garth/
+.garminconnect/
 tokens.json
+
+# Claude Code worktrees
+.claude/
 
 # OS
 .DS_Store

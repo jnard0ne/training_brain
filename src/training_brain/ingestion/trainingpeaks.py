@@ -59,7 +59,9 @@ def sync_planned() -> TPSyncResult:
         raise RuntimeError("TP_ICAL_URL must be set in .env")
 
     result = TPSyncResult()
-    response = httpx.get(s.tp_ical_url, timeout=30.0)
+    # TP's iCal field issues a webcal:// URL; httpx only speaks http/https.
+    url = re.sub(r"^webcal://", "https://", s.tp_ical_url)
+    response = httpx.get(url, timeout=30.0, follow_redirects=True)
     response.raise_for_status()
     cal = Calendar.from_ical(response.text)
 

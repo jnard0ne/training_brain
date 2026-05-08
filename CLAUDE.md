@@ -22,7 +22,7 @@ Do not add a TP web scraper without explicit confirmation — it's brittle, ToS 
 
 | Source | Library | Auth | Used for |
 |---|---|---|---|
-| Garmin Connect | `garth` | Stored token (one-time interactive login) | Activities, FIT files, sleep, HRV, RHR, body battery, stress, weight, training readiness |
+| Garmin Connect | `garminconnect` (cyberjunky) + `curl_cffi` | Stored token (one-time interactive login, cached to `~/.garminconnect`) | Activities, FIT files, sleep, HRV, RHR, body battery, stress, weight, training readiness |
 | TrainingPeaks | iCal feed (HTTP GET) | Tokenized URL | Planned workouts |
 | Strava | `stravalib` | OAuth | Activity dedup, route polylines |
 
@@ -56,7 +56,7 @@ Tables (high level):
 
 - Local dev: `.env` (gitignored). See `.env.example`.
 - Production cron: env vars on the host running OpenClaw cron.
-- `garth`'s token cache (`~/.garth/`) stays out of the repo.
+- `garminconnect`'s token cache (`~/.garminconnect/`) stays out of the repo.
 
 ## Layout
 
@@ -95,15 +95,20 @@ training_brain/
 
 ## Build status
 
-The plan is set; code is not yet written. Build phases (in order):
+Code-complete; not yet exercised against live credentials. Build phases:
 
-1. Repo skeleton (`pyproject.toml`, `.env.example`, `.gitignore`, package layout)
-2. Supabase project + schema migrations
-3. Garmin ingestion (`garth`)
-4. TrainingPeaks iCal ingestion
-5. Daily + intraday sync entrypoints
-6. Backfill (12-month default)
-7. Strava ingestion (lower priority)
-8. Skill file (`skills/training-brain.md`)
+1. ✅ Repo skeleton (`pyproject.toml`, `.env.example`, `.gitignore`, package layout)
+2. ✅ Supabase project + schema migrations (4 migrations applied; `fit-files` bucket created; athlete row seeded)
+3. ✅ Garmin ingestion (`garminconnect` — migrated from deprecated `garth` 2026-05-08)
+4. ✅ TrainingPeaks iCal ingestion
+5. ✅ Daily + intraday sync entrypoints (`src/training_brain/sync.py`)
+6. ✅ Backfill (12-month default)
+7. ✅ Strava ingestion
+8. ✅ Skill file (`skills/training-brain.md`)
+
+**Remaining before first real use:**
+- Populate local `.env` (Garmin login, TP iCal URL, Strava OAuth, Supabase service key)
+- Run `sync daily` end-to-end and verify data lands in canonical tables
+- Schedule the OpenClaw cron (intraday + daily)
 
 Update this section as phases complete.

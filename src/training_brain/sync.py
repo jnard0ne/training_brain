@@ -28,7 +28,7 @@ app = typer.Typer(no_args_is_help=True, add_completion=False)
 
 @app.command("login-garmin")
 def login_garmin() -> None:
-    """One-time interactive Garmin login. Caches token to ~/.garth."""
+    """One-time interactive Garmin login. Caches tokens to ~/.garminconnect."""
     garmin.login_interactive()
     typer.echo("Garmin token saved.")
 
