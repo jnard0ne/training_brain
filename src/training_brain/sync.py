@@ -20,10 +20,12 @@ from typing import Annotated, Any
 
 import typer
 
+from training_brain import query
 from training_brain.ingestion import garmin, trainingpeaks
 
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
+query.register(app)
 
 
 @app.command("login-garmin")
