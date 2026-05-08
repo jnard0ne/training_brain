@@ -36,7 +36,7 @@ Different metrics change at different rates, so sync runs in two profiles, both 
 - **`sync daily`** (early morning) — sleep, overnight HRV, RHR, weight, planned workouts (TP iCal), executed activities + FIT files, Strava cross-check.
 - **`sync backfill --since YYYY-MM-DD`** (manual) — historical sweep, default 12 months. Rate-limit-aware paging.
 
-CLI entrypoints live in `src/training_brain/sync.py`. Re-running any profile is always safe.
+CLI entrypoints live in `src/training_brain/sync.py` (writes — sync profiles + Garmin login) and `src/training_brain/query.py` (reads — briefing, today, last, recent, recovery, status). Both are mounted on the same `training-brain` binary; re-running any sync profile is always safe.
 
 ## Storage
 
@@ -52,7 +52,7 @@ Tables (high level):
 
 ## Secrets
 
-**No credentials in the repo.** This includes Garmin email/password, TP iCal token URL, Strava client secret, Supabase service key.
+**No credentials in the repo.** This includes Garmin email/password, TP iCal token URL, Strava client secret, Supabase secret key.
 
 - Local dev: `.env` (gitignored). See `.env.example`.
 - Production cron: env vars on the host running OpenClaw cron.
@@ -71,8 +71,8 @@ training_brain/
 │   │   ├── garmin.py
 │   │   ├── trainingpeaks.py
 │   │   └── strava.py
-│   ├── normalize.py                # canonical model + cross-source dedup
-│   ├── sync.py                     # CLI: intraday | daily | backfill
+│   ├── sync.py                     # CLI: write subcommands (intraday | daily | backfill | login-garmin)
+│   ├── query.py                    # CLI: read subcommands (briefing | today | last | recent | recovery | status)
 │   └── db.py
 ├── db/
 │   └── migrations/
@@ -95,20 +95,20 @@ training_brain/
 
 ## Build status
 
-Code-complete; not yet exercised against live credentials. Build phases:
+Live and exercised against real data. Build phases:
 
 1. ✅ Repo skeleton (`pyproject.toml`, `.env.example`, `.gitignore`, package layout)
-2. ✅ Supabase project + schema migrations (4 migrations applied; `fit-files` bucket created; athlete row seeded)
+2. ✅ Supabase project + schema migrations (5 migrations applied; `fit-files` bucket created; athlete row seeded)
 3. ✅ Garmin ingestion (`garminconnect` — migrated from deprecated `garth` 2026-05-08)
 4. ✅ TrainingPeaks iCal ingestion
 5. ✅ Daily + intraday sync entrypoints (`src/training_brain/sync.py`)
 6. ✅ Backfill (12-month default)
-7. ✅ Strava ingestion
+7. ✅ Strava ingestion (code-complete; not yet wired up — credentials optional)
 8. ✅ Skill file (`skills/training-brain.md`)
+9. ✅ Read CLI: briefing / today / last / recent / recovery / status (`src/training_brain/query.py`)
 
-**Remaining before first real use:**
-- Populate local `.env` (Garmin login, TP iCal URL, Strava OAuth, Supabase service key)
-- Run `sync daily` end-to-end and verify data lands in canonical tables
-- Schedule the OpenClaw cron (intraday + daily)
+**Remaining:**
+- Schedule the OpenClaw cron (intraday + daily) on the production host.
+- TP description parser to recover `duration_planned_s` and `tss_planned` from event description text — until then, both fields are unreliable on all-day iCal events. Documented in the skill file under "Known data-quality gaps."
 
 Update this section as phases complete.

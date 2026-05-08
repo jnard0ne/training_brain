@@ -228,7 +228,19 @@ Always cite the dates of the data you pulled.
 
 Triggered by phrases like "morning briefing", "what's today look like", "give me my daily report", or by an automated cron at ~6am local. Goal: one short message a coach could send. Pulls everything needed in a single round-trip; narrates in 4–6 lines.
 
-Single-query pattern (substitute the athlete UUID for `$1` and the local TZ for `'America/Los_Angeles'`):
+### Two ways to fetch the data
+
+**If you have shell access** (much cheaper): the project ships a `training-brain` CLI that hits the same data via PostgREST and emits identical JSON:
+
+```
+training-brain briefing --json
+```
+
+Returned shape: `{ date, wellness, wellness_fallback_to_yesterday, yesterday, plan, load_14d_avg_tss, anomalies }`. The CLI already runs the anomaly checks below and returns them pre-computed, so if you have shell access you can skip straight to the narrative step.
+
+The CLI also exposes `today`, `last [--sport S]`, `recent [--days N]`, `recovery [--days N]`, and `status` — same rule, all support `--json`. Prefer these over hand-written SQL when shell access is available.
+
+**If you only have the Supabase MCP**, run the CTE below. Substitute the athlete UUID for `$1` and the local TZ for `'America/Los_Angeles'`:
 
 ```sql
 with tz as (select 'America/Los_Angeles'::text as tz),
