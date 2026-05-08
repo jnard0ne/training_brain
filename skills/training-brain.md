@@ -17,9 +17,16 @@ When facts conflict, prefer in this order:
 
 ## How to query
 
-Use the Supabase MCP tool `mcp__plugin_supabase_supabase__execute_sql`. Project ref is in the user's `.env` as `SUPABASE_URL` (or ask the user / check memory). Read-only by intent — never write from this skill.
+Use the Supabase MCP tool `mcp__plugin_supabase_supabase__execute_sql`. Read-only by intent — never write from this skill.
 
-When the user asks about "today" or "recent," prefer the athlete's local date (timezone is on `athletes.timezone`, typically `America/Los_Angeles`). Recent days may be partial: the daily sync runs in the early morning, intraday sync runs every 30–60 min. Check `wellness_daily.daily_updated_at` and `intraday_updated_at` if freshness matters.
+To find the project ref:
+1. Check the user's auto-memory for a "Supabase project" entry — that's the canonical record.
+2. Fall back to `.env`'s `SUPABASE_URL` (`https://<ref>.supabase.co`).
+3. Last resort: `mcp__plugin_supabase_supabase__list_projects` and pick the one named `training_brain`.
+
+The athlete UUID also lives in memory and `.env` (`ATHLETE_ID`); use it as `$1` in the queries below or substitute literally.
+
+When the user asks about "today" or "recent," prefer the athlete's local date (timezone is on `athletes.timezone`, typically `America/Los_Angeles`). Recent days may be partial: the daily sync runs once in the early morning and the intraday sync (when wired into cron) refreshes body battery / stress / training readiness every 30–60 min. Check `wellness_daily.daily_updated_at` and `intraday_updated_at` if freshness matters — if `daily_updated_at` is null on today's row, overnight values (sleep, HRV, RHR) haven't been pulled yet and the user should rerun `daily` or wait for the morning sync.
 
 ## Schema (the parts you'll touch)
 
@@ -185,10 +192,21 @@ limit 14;
 
 The 90-day warmup matters — without it CTL is artificially low at the start of the window. If the user asks about CTL/ATL near the start of the data range, mention that it's still warming up.
 
+## Known data-quality gaps (read before quoting numbers)
+
+The data tier is live but a few extractors are still rough — call these out when relevant rather than presenting bad numbers as fact.
+
+- **TP planned duration is mostly garbage.** All-day iCal events come through with `duration_planned_s = 86400` (24h). The real planned duration lives in the event description text (e.g., `Planned Time: 1:30`). Until the description parser ships, `duration_planned_s` is reliable only on events with a real DTEND in the iCal feed (rare). Prefer pulling the description and quoting the planned time from there.
+- **TP `tss_planned` is almost always NULL.** Same reason — it's in the description text, not a structured field. Don't compute plan-vs-actual TSS deltas; quote actual TSS only.
+- **Sport inference for TP events is keyword-based.** Anything the heuristic misses lands as `'other'` (rest days, race events, anything non-keyword). For plan-vs-actual, also try matching by date alone when the sport-side join misses, and inspect `description` to confirm.
+- **Wellness staleness on the same morning.** The daily sync writes most fields; `weight_kg` / `body_fat_pct` are only populated when the user actually weighs in that day. NULL there means "didn't weigh in," not "missing data."
+
+When something looks weird, the `raw_*` audit tables hold the original payloads — `raw_garmin_events.payload` is jsonb keyed by date and `kind`, useful for diagnosing extractor regressions.
+
 ## Things to be careful about
 
 - **Time zones**: `wellness_daily.date` is the athlete's local date (overnight HRV/sleep are reported by Garmin per local night). `workouts_executed.started_at` is UTC — convert with `at time zone 'America/Los_Angeles'` (or whatever's in `athletes.timezone`) when joining to a planned `date`.
-- **Missing data**: `tss` and `tss_planned` are commonly NULL when the workout isn't structured around power/HR. Don't pretend NULL is zero in narrative answers — say "no TSS recorded."
+- **Missing data**: `tss` is commonly NULL when the workout isn't structured around power/HR. Don't pretend NULL is zero in narrative answers — say "no TSS recorded." See the data-quality section above for `tss_planned` and `duration_planned_s`.
 - **Same-day duplicates**: Plan ↔ execution match by date+sport breaks if the athlete does two of the same sport. Disambiguate.
 - **Freshness**: Today's `wellness_daily` may have only the intraday columns populated. Tell the user that overnight values (sleep, HRV) usually populate after the morning daily sync.
 - **Deep dives**: For a full-resolution workout analysis, fetch the FIT from Storage:
@@ -205,3 +223,81 @@ Recovery-style questions ("how's my recovery trending") want a short narrative, 
 Plan-vs-actual questions want concrete numbers: planned X, executed Y, delta Z, and a one-line "you nailed it" / "fell short on duration" / "went harder than planned."
 
 Always cite the dates of the data you pulled.
+
+## Morning briefing
+
+Triggered by phrases like "morning briefing", "what's today look like", "give me my daily report", or by an automated cron at ~6am local. Goal: one short message a coach could send. Pulls everything needed in a single round-trip; narrates in 4–6 lines.
+
+Single-query pattern (substitute the athlete UUID for `$1` and the local TZ for `'America/Los_Angeles'`):
+
+```sql
+with tz as (select 'America/Los_Angeles'::text as tz),
+today as (select (now() at time zone (select tz from tz))::date as d),
+last_night as (
+    select date, sleep_total_s/3600.0 as sleep_h, sleep_score,
+           hrv_overnight_ms, hrv_baseline_ms, rhr_bpm,
+           body_battery_high, body_battery_low, training_readiness
+    from wellness_daily
+    where athlete_id = $1
+      and date = (select d from today)
+),
+yesterday_done as (
+    select sport, started_at, duration_s/60.0 as min,
+           distance_m/1000.0 as km, tss, avg_hr, avg_power
+    from workouts_executed
+    where athlete_id = $1
+      and (started_at at time zone (select tz from tz))::date = (select d from today) - 1
+    order by started_at
+),
+today_plan as (
+    select sport, duration_planned_s/60.0 as planned_min,
+           tss_planned, description
+    from workouts_planned
+    where athlete_id = $1
+      and date = (select d from today)
+    order by sport
+),
+load as (
+    -- 14d rolling so the briefing can flag deep fatigue without paging through CTL/ATL.
+    select round(avg(coalesce(tss, 0))::numeric, 1) as avg_tss_14d
+    from (
+        select gs::date as d
+        from generate_series((select d from today) - 13, (select d from today), '1 day') gs
+    ) days
+    left join workouts_executed e
+      on e.athlete_id = $1
+     and (e.started_at at time zone (select tz from tz))::date = days.d
+)
+select
+    (select row_to_json(last_night) from last_night)        as wellness,
+    (select coalesce(json_agg(yesterday_done), '[]'::json)
+       from yesterday_done)                                  as yesterday,
+    (select coalesce(json_agg(today_plan), '[]'::json)
+       from today_plan)                                      as plan,
+    (select avg_tss_14d from load)                           as load_14d;
+```
+
+### Narrative shape
+
+Lead with recovery, then plan. Six lines max. Use this template:
+
+> **<weekday>, <date>.** Slept <h>h, score <n>. HRV <ms>ms (baseline <ms>) — <interpretation>. RHR <bpm>. Training readiness <n>/100.
+> **Yesterday:** <executed summary, one line per workout, "no workouts logged" if empty>.
+> **Today:** <planned summary, prefer description over duration_planned_s — see data-quality gaps>. <Race/key-workout flag if present in description>.
+> <One-line coaching nudge if anomaly: HRV >5ms below baseline, sleep <6h, body battery low end >40, or yesterday TSS >2× 14-day avg. Otherwise omit.>
+
+### Anomaly thresholds (call them out, don't bury them)
+
+- HRV: >5ms or >10% below `hrv_baseline_ms` for 2+ consecutive days.
+- Sleep: under 6h, or sleep_score <60.
+- RHR: >5bpm above the trailing 14-day median.
+- Training readiness: <40.
+- Acute load: yesterday's TSS >2× the 14-day rolling average.
+
+If two or more of those fire, lead with a "back off today" recommendation rather than just listing the data — the user's coach already wrote the plan, but the briefing's job is to flag when the plan and the body disagree.
+
+### Empty-data behavior
+
+- No `last_night` row → "Wellness sync hasn't run for today yet — running on yesterday's numbers." then re-query for `(select d from today) - 1`.
+- No `yesterday_done` and no `today_plan` → keep it short: "Rest day, nothing logged. <wellness line>."
+- Briefing called from cron with no recipient → emit the narrative to stdout; the cron host is responsible for piping to wherever (Slack, email, push).
