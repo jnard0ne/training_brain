@@ -1,174 +1,276 @@
 # training_brain
 
-A personal data tier for triathlon training. Pulls planned workouts from
+A personal data tier for endurance training. Pulls planned workouts from
 TrainingPeaks, executed workouts and physiology from Garmin Connect, and
-(optionally) cross-checks against Strava — then normalizes everything into
-Supabase Postgres so a Claude / OpenClaw skill can answer questions about
-recovery, plan-vs-actual execution, and training load.
+(optionally) cross-checks against Strava — then normalizes everything into a
+Supabase Postgres database that you own.
 
-This repo is the data tier only. Daily reports and other downstream outputs
-are produced by separate skills that query the schema described in
-[`skills/training-brain.md`](skills/training-brain.md).
-
-## How it works
+The point: stop logging into three different apps to answer one question
+about your own training. Your data lives in one place, queryable by SQL or
+by any AI agent that can read [AGENTS.md](AGENTS.md).
 
 ```
 Garmin Connect  ──┐
-TrainingPeaks   ──┼──►  ingestion  ──►  normalize  ──►  Supabase Postgres  ──►  Claude/OpenClaw skill
-Strava          ──┘                                     + Storage (FIT files)
+TrainingPeaks   ──┼──►  ingestion  ──►  Supabase Postgres  ──►  CLI / your agent
+Strava          ──┘                     + Storage (FIT files)
 ```
 
-- **Garmin** (`garminconnect` + `curl_cffi`) — activities, FIT files, sleep, HRV, RHR, body battery, stress, weight, training readiness. Migrated from `garth` after Garmin's March 2026 Cloudflare changes broke its login flow.
-- **TrainingPeaks** — official iCal feed parsed for planned workouts. No public TP API exists for individuals; iCal is the stable export.
-- **Strava** (`stravalib`) — supplemental, deduped against Garmin by start time + sport.
-- **Zwift** — no direct integration; Zwift auto-syncs to Garmin and Strava.
+This is a personal project that's been made public so others can replicate
+it. I don't take pull requests — fork it and make it yours.
 
-The `training-brain` CLI (installed by `pip install -e .`) is the entrypoint for both writes (sync) and reads (queries):
+---
 
-- **Sync** — drives the OpenClaw cron:
-  - `training-brain intraday` — every 30–60 min for body battery / stress / training readiness.
-  - `training-brain daily` — early-morning refresh of sleep, HRV, RHR, weight, activities, and TP plan.
-- **Queries** — for poking at the data from the terminal (or any agent with shell access):
-  - `training-brain briefing` — today's wellness + yesterday's executed + today's plan + 14d load + anomaly flags.
-  - `training-brain today` — today's planned workouts.
-  - `training-brain last [--sport S]` — most recent completed workout.
-  - `training-brain recent [--days N]` — last N days of executed workouts (default 7).
-  - `training-brain recovery [--days N]` — wellness trend (default 14).
-  - `training-brain analyze [<garmin_id>]` — deep dive on a single workout: laps, mean-max power/HR curve, time-in-zone, aerobic decoupling. Defaults to most recent.
-  - `training-brain status` — sync timestamps, row counts, FIT bucket size.
+## What you get
 
-Every read command takes `--json` for machine-readable output. Both sync profiles are idempotent.
+A working end-to-end data tier with:
 
-## Replication
+- **Daily wellness ingestion** — sleep, HRV, RHR, body battery, stress, training readiness, weight (when you weigh in).
+- **Workout ingestion** — every activity from Garmin (which receives most workouts via Garmin/Zwift sync) plus the original `.fit` file in Supabase Storage. One canonical row per workout, deduped across sources.
+- **TrainingPeaks plan ingestion** — your coach's planned workouts via the official iCal feed.
+- **1Hz workout streams** — every executed workout is parsed into per-second time series (HR, power, cadence, speed, altitude, GPS) for detailed analysis. Plus per-lap summaries from the FIT file.
+- **A read CLI** with seven commands: morning briefing, today's plan, last workout, recent activity, recovery trend, deep workout analysis, and status.
+- **Time-in-zone analysis** — once you seed your zones, every analysis surfaces zone distributions for HR, power, and pace.
+- **Aerobic decoupling, mean-max curves, lap-by-lap splits** — out of the box.
+- **An [AGENTS.md](AGENTS.md) file** any AI agent can read to answer training questions — morning briefings, plan vs. actual, recovery summaries, workout deep-dives.
 
-> Forkers: this section assumes you want your own deployment — your own Supabase project, your own Garmin/TP/Strava credentials.
+What it isn't:
 
-### 1. Prereqs
+- Not a coaching app. It doesn't tell you what to do tomorrow.
+- Not a multi-tenant SaaS. One athlete, one database.
+- Not a TrainingPeaks scraper. Plan data comes from the official iCal feed, not the TP web app. If you edit a workout in TP after the fact, this pipeline won't see the edit.
 
-- Python 3.11+
-- A Supabase account (the free plan is enough)
-- A Garmin Connect account
-- A TrainingPeaks account with a personal iCal feed URL
-- (Optional) A Strava API app (Settings → API at strava.com)
+---
 
-### 2. Install
+## Setup
+
+This guide assumes you can use a terminal but aren't a working developer.
+Each step is independent — if one breaks, you can come back to it. If you'd
+rather have an AI agent walk you through it, skip to **[Setup with an AI
+agent](#setup-with-an-ai-agent)** below.
+
+### What you'll need
+
+- A computer running macOS or Linux (Windows works with WSL, untested).
+- Python 3.11 or newer. Check with `python3 --version`. If you're below 3.11, install from [python.org](https://www.python.org/downloads/) or via your package manager.
+- A free [Supabase](https://supabase.com) account.
+- A Garmin Connect account.
+- A TrainingPeaks account (the iCal feed is free for any TP plan).
+- (Optional) A Strava account with API access.
+
+### 1. Clone the repo
 
 ```bash
-git clone <your-fork>
+git clone https://github.com/jnard0ne/training_brain.git
 cd training_brain
-python -m venv .venv && source .venv/bin/activate
+```
+
+### 2. Set up Python
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -e .
 ```
 
-### 3. Provision Supabase
+The first line creates an isolated Python environment in `.venv/`. The second activates it (you'll need to re-run this whenever you open a new terminal). The third installs the project and its dependencies.
 
-Create a Supabase project, then apply the migrations in `db/migrations/` in order. Two ways:
+After this you should have a `training-brain` command available:
 
-- **Supabase CLI**: `supabase link --project-ref <ref>` then `supabase db push` after copying the SQL into a `supabase/migrations` directory.
-- **Supabase MCP** (if using Claude Code): the `apply_migration` tool runs each file directly.
-- **Dashboard**: paste each SQL file into the SQL editor and run.
-
-Then seed your athlete row:
-
-```sql
-insert into athletes (name, timezone)
-values ('Your Name', 'America/Los_Angeles')
-returning id;
+```bash
+training-brain --help
 ```
 
-Save the returned UUID — it goes in `.env` as `ATHLETE_ID`.
+### 3. Create your Supabase project
+
+1. Sign in to [supabase.com](https://supabase.com), click **New project**, give it a name and a strong database password (you won't need it for this project, but Supabase requires one). Pick a region close to you.
+2. While it provisions, open the **SQL Editor** tab.
+3. Apply the migrations in `db/migrations/` **in order** (0001, 0002, …). For each file: open it in your text editor, paste the contents into the SQL Editor, click **Run**. There are 6 migrations as of this writing.
+4. After the migrations run, seed your athlete row in the SQL Editor:
+   ```sql
+   insert into athletes (name, timezone)
+   values ('Your Name', 'America/Los_Angeles')
+   returning id;
+   ```
+   Replace the timezone with [your IANA timezone](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) (e.g. `Europe/London`, `Australia/Sydney`). Save the returned UUID — you'll need it in the next step.
 
 ### 4. Configure `.env`
 
 ```bash
 cp .env.example .env
-# then fill in the values
 ```
 
-Required: `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, `ATHLETE_ID`, `GARMIN_EMAIL`, `GARMIN_PASSWORD`, `TP_ICAL_URL`. Strava vars are optional.
+Open `.env` in your text editor and fill in the values:
 
-`SUPABASE_SECRET_KEY` is the modern `sb_secret_...` key from **Project Settings → API Keys** — not the legacy `service_role` JWT.
-
-The TP iCal URL is found at TrainingPeaks under **Settings → Account Settings → Sharing → Calendar Feed**. It's tokenized — treat as secret.
+- `SUPABASE_URL` — from Supabase → **Project Settings → API**. Format: `https://<project-ref>.supabase.co`.
+- `SUPABASE_SECRET_KEY` — same page, under **API Keys**. Use the modern `sb_secret_…` key, not the legacy `service_role` JWT. Treat as a password.
+- `ATHLETE_ID` — the UUID you saved from step 3.
+- `GARMIN_EMAIL` and `GARMIN_PASSWORD` — your Garmin Connect login.
+- `TP_ICAL_URL` — TrainingPeaks → **Settings → Account Settings → Sharing → Calendar Feed**. The URL is tokenized — treat it as a password.
+- (Optional) `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET`, `STRAVA_REFRESH_TOKEN` — only if you want Strava cross-checking. Leave blank to skip.
 
 ### 5. One-time Garmin login
+
+Garmin's API requires a real login with MFA the first time. After that, a token cache at `~/.garminconnect/` keeps subsequent runs unattended.
 
 ```bash
 training-brain login-garmin
 ```
 
-This will prompt for MFA. Tokens are cached to `~/.garminconnect/` and refreshed automatically on subsequent runs. Re-run it if cron starts complaining about a stale session.
+You'll be prompted for an MFA code. Enter the 6-digit code Garmin texts/emails you. On success it caches tokens silently. If it errors with a `429`, wait 15 minutes and try again — Garmin rate-limits aggressive logins.
 
-### 6. Backfill history
+### 6. Backfill your history
 
 ```bash
-training-brain backfill --since 2025-05-04
+training-brain backfill --since 2025-05-01
 ```
 
-Defaults to 12 months. Garmin and Strava rate limits are gentle for one athlete; expect this to take a few minutes for the wellness sweep plus more for activity FIT downloads.
+Pulls the last year of activities, FIT files, and wellness data. Takes a few minutes. Garmin's rate limits are gentle for one athlete; if it does throw a `429` partway through, wait 30 minutes and re-run — the sync is idempotent and picks up where it left off.
 
-### 7. Schedule the daily and intraday sync
+### 7. Verify it's working
 
-Wire OpenClaw cron (or any cron) to:
+```bash
+training-brain status      # row counts, latest sync timestamps, FIT bucket size
+training-brain briefing    # today's morning briefing — your end-to-end smoke test
+training-brain analyze     # deep dive on the most recent workout
+```
+
+If `status` shows non-zero rows in `workouts_executed`, `wellness_daily`, and `workouts_planned`, you're done with the core setup.
+
+### 8. Schedule the daily sync
+
+Wire whatever scheduler you have (cron, systemd timers, macOS launchd, your AI agent's built-in scheduler, etc.) to run two commands:
 
 ```
 */45 * * * *   training-brain intraday
 0 5    * * *   training-brain daily
 ```
 
-Both write a JSON blob to stdout and exit non-zero on any per-source failure, so logging and alerting are straightforward.
-
-### 8. Verify it's working
-
-```bash
-training-brain status      # row counts, latest sync timestamps, FIT bucket size
-training-brain briefing    # today's morning briefing — your end-to-end smoke test
-training-brain analyze     # deep dive on the most recent workout (laps, mean-max, decoupling)
-```
+The `intraday` profile refreshes fast-changing wellness (body battery, stress, training readiness) every 45 minutes. The `daily` profile pulls overnight HRV, sleep, RHR, weight, executed workouts, and the TP plan — once in the early morning. Both are idempotent; running them too often is harmless beyond extra audit-table rows.
 
 ### 9. (Optional) Seed your training zones
 
-Time-in-zone analysis in `analyze` needs zone definitions. Insert your coach-defined HR / power / pace zones into `training_zones`:
+Time-in-zone analysis in `analyze` needs zone definitions. If you have them in TrainingPeaks, paste them into the SQL Editor:
 
 ```sql
--- example: 5-zone HR for run, replace with your own thresholds
+-- Example: 7-zone HR for run, replace with your own thresholds.
 insert into training_zones (athlete_id, sport, metric, zone, lower, upper) values
     ('<your-athlete-uuid>', 'run', 'hr', 1, 0,   130),
-    ('<your-athlete-uuid>', 'run', 'hr', 2, 130, 145),
-    ('<your-athlete-uuid>', 'run', 'hr', 3, 145, 160),
-    ('<your-athlete-uuid>', 'run', 'hr', 4, 160, 175),
-    ('<your-athlete-uuid>', 'run', 'hr', 5, 175, 999);
+    ('<your-athlete-uuid>', 'run', 'hr', 2, 131, 145),
+    ('<your-athlete-uuid>', 'run', 'hr', 3, 146, 160),
+    ('<your-athlete-uuid>', 'run', 'hr', 4, 161, 175),
+    ('<your-athlete-uuid>', 'run', 'hr', 5, 176, 190),
+    ('<your-athlete-uuid>', 'run', 'hr', 6, 191, 200),
+    ('<your-athlete-uuid>', 'run', 'hr', 7, 201, 255);
 ```
 
-Skip this step if you only want lap analysis + mean-max curves; analyze falls back gracefully without zones.
+Repeat for each `(sport, metric)` pair you want — common ones are `bike/power`, `bike/hr`, `run/hr`, `run/pace_s_per_km`. Pace zones use seconds-per-km (smaller = faster). `analyze` falls back gracefully when zones aren't seeded — you just won't see the time-in-zone tables.
 
-## Layout
+### 10. (Optional) Strava
+
+If you want Strava as a cross-check source:
+
+1. Create an API app at [strava.com/settings/api](https://www.strava.com/settings/api).
+2. Run a one-time OAuth dance to get a refresh token. (Strava's [getting-started guide](https://developers.strava.com/docs/getting-started/) is the canonical reference; the short version is: get an authorization code via the browser, exchange it for a refresh token via `curl`.)
+3. Drop `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET`, and `STRAVA_REFRESH_TOKEN` into `.env`. The next sync will pull Strava activities.
+
+Skip this if you don't care about Strava-specific metrics (route polylines, segment matching) — Garmin is the primary source for execution data.
+
+---
+
+## Setup with an AI agent
+
+If you'd rather have an AI agent walk you through setup, paste this prompt
+into your tool of choice (Claude Code, Cursor, Codex, ChatGPT with code
+interpreter, etc.). The agent should be able to read files in this repo.
 
 ```
-training_brain/
-├── CLAUDE.md                    # context for AI agents working in this repo
-├── README.md                    # you are here
-├── .env.example
-├── pyproject.toml
-├── db/migrations/               # SQL migrations, applied in order
-├── src/training_brain/
-│   ├── db.py                    # Supabase client + env loader
-│   ├── sync.py                  # CLI entrypoint; sync subcommands (intraday / daily / backfill / login-garmin)
-│   ├── query.py                 # CLI read subcommands (briefing / today / last / recent / recovery / analyze / status)
-│   ├── streams.py               # FIT parser; populates activity_streams + workout_laps on every sync
-│   └── ingestion/
-│       ├── garmin.py
-│       ├── trainingpeaks.py
-│       └── strava.py
-└── skills/
-    └── training-brain.md        # the skill consumed by Claude / OpenClaw
+I want to set up the training_brain data tier on my machine. It centralizes
+my training data from TrainingPeaks, Garmin Connect, and Strava into a
+Supabase Postgres database I own.
+
+The repo is cloned at the current directory. Read README.md for the full
+setup procedure and AGENTS.md for what you'll be able to do once it's
+running. Then walk me through setup step by step:
+
+1. Confirm I have Python 3.11+. Help me create the virtual env (.venv) and
+   install the package with `pip install -e .`.
+2. Help me create a Supabase project, then apply each migration in
+   db/migrations/ in order via the Supabase SQL Editor (or via the
+   Supabase MCP if that's connected). Then seed my athlete row.
+3. Walk me through populating .env: Supabase URL + secret key, athlete
+   UUID, Garmin login, TP iCal URL. Don't echo my secrets back — just
+   confirm each var is set with a non-echoing presence check.
+4. Have me run `training-brain login-garmin` in my own terminal so I can
+   enter the MFA code interactively.
+5. Run `training-brain backfill --since YYYY-MM-DD` for the last 12
+   months. If Garmin returns 429, wait and retry — the sync is idempotent.
+6. Verify with `training-brain status` (row counts, latest sync
+   timestamps) and `training-brain briefing` (end-to-end smoke test).
+7. Help me schedule the cron (intraday every 45 min, daily at 5am).
+8. Optionally: help me seed training_zones with my coach-defined HR and
+   power zones if I have them, so time-in-zone analysis works in the
+   `analyze` command.
+
+Wait for me to confirm each step before moving on. If anything fails, run
+`training-brain status` first, and inspect raw_garmin_events.payload via
+the Supabase SQL editor for any wellness fields that look stale or wrong.
+
+Once setup is done, you'll be able to answer my training questions using
+the patterns described in AGENTS.md.
 ```
 
-For deeper architectural context (why iCal, source authority, refresh cadences, how to add a metric), see [`CLAUDE.md`](CLAUDE.md).
+After setup, your agent can answer training questions directly — no further
+configuration needed. AGENTS.md is read on every session.
+
+---
+
+## Daily use
+
+Once it's running, you mostly don't think about it. The cron keeps your
+data fresh; you ask your agent training questions and it queries the
+database.
+
+A few CLI commands worth knowing for ad-hoc checks:
+
+| Command | What it shows |
+|---|---|
+| `training-brain briefing` | Today's wellness + yesterday's executed + today's plan + load + anomaly flags |
+| `training-brain today` | Just today's planned workouts |
+| `training-brain last` | Most recent completed workout |
+| `training-brain recent --days 7` | Last week's workouts as a table |
+| `training-brain recovery --days 14` | Wellness trend |
+| `training-brain analyze [<garmin_id>]` | Lap table, mean-max curve, time-in-zone, aerobic decoupling for one workout |
+| `training-brain status` | Sync timestamps, row counts, FIT bucket size |
+
+Every read command takes `--json` for piping into other tooling.
+
+---
 
 ## Caveats
 
-- **TrainingPeaks edits**: if you manually edit a workout in TP after the fact, this pipeline won't see the edit (Garmin is the execution-data source). Acceptable for v1.
-- **Same-day duplicates**: plan-↔-execution match is by date + sport. If you do two swims in a day, the join is ambiguous.
-- **Garmin response drift**: Garmin Connect response shapes vary between accounts and change over time. The wellness extractors and `SPORT_MAP` in `ingestion/garmin.py` are calibrated against one account as of May 2026. If new accounts or a Garmin update surface fields that aren't being captured, inspect `raw_garmin_events.payload` (jsonb) for the original response and extend the extractors.
-- **TP planned duration / TSS**: TrainingPeaks all-day iCal events surface `duration_planned_s = 86400` and `tss_planned = null`. The real values live in the event description text (`Planned Time: 1:30`, etc.). A description parser is on the backlog; until then, use `description` directly when quoting plan numbers.
+- **Garmin auth is fragile by nature.** Garmin can change their login flow at any time and break the underlying library. As of May 2026 the project uses [`cyberjunky/python-garminconnect`](https://github.com/cyberjunky/python-garminconnect) (the previous library, `garth`, was deprecated in March 2026 after Garmin added Cloudflare protections). If your sync starts failing with auth errors after a Garmin update, check the upstream library for a new release.
+- **TrainingPeaks edits.** If you manually edit a workout in TP after the fact, this pipeline won't see the edit (Garmin is the execution-data source). Acceptable for most use; revisit if you edit TP heavily.
+- **Same-day duplicates.** Plan ↔ execution match is by date + sport. If you do two swims in a day, the join is ambiguous and your agent will tell you so.
+- **TP planned duration / TSS.** TrainingPeaks all-day iCal events surface `duration_planned_s = 86400` (24h) and `tss_planned = null`. The real values live in the event description text (`Planned Time: 1:30`). A description parser is on the backlog; until then, agents quote the description directly when asked about planned values.
+- **Garmin response drift.** The wellness extractors are calibrated against one account. If new fields surface or rename, inspect `raw_garmin_events.payload` (a jsonb column with the original API response) and extend the extractors in `src/training_brain/ingestion/garmin.py`.
+
+---
+
+## Extending the project
+
+The codebase is a few hundred lines of straightforward Python. The main pieces:
+
+- `src/training_brain/sync.py` — write CLI (sync subcommands, Garmin login)
+- `src/training_brain/query.py` — read CLI (briefing, today, last, recent, recovery, analyze, status)
+- `src/training_brain/streams.py` — FIT parser; populates `activity_streams` and `workout_laps`
+- `src/training_brain/ingestion/` — per-source ingesters (Garmin, TrainingPeaks, Strava)
+- `src/training_brain/db.py` — Supabase client + env loader
+- `db/migrations/` — SQL migrations, applied in order
+
+If you want to add a new metric (say, `vo2_max` from a different source), the rough recipe is:
+
+1. Add a column to the relevant canonical table via a new migration in `db/migrations/`.
+2. Extend the matching ingester in `src/training_brain/ingestion/` to populate it.
+3. Update [AGENTS.md](AGENTS.md)'s schema section so any agent reading it knows the metric exists and how to query it.
+
+[AGENTS.md](AGENTS.md) is the source of truth for what an agent can do with this data tier. Keep it in sync with the schema; a stale AGENTS.md means agents return wrong answers silently.

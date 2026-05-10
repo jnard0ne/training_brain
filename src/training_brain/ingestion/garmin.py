@@ -8,7 +8,7 @@ Public surface:
 
 Garmin is the source for raw physiology and the bulk of executed-workout data.
 TP outranks Garmin if a workout is ever manually edited there, but in practice
-that diff is rare; the tradeoff is documented in CLAUDE.md.
+that diff is rare; the tradeoff is documented in AGENTS.md under "Source authority."
 
 Replaces the original garth-based client (deprecated 2026-03-27 after Garmin
 added Cloudflare protections). The new lib ships a native mobile-SSO auth

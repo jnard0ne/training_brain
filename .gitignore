@@ -20,6 +20,9 @@ tokens.json
 # Claude Code worktrees
 .claude/
 
+# Private project notes (per-clone, not shared)
+NOTES.md
+
 # OS
 .DS_Store
 
