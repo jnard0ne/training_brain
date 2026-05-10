@@ -274,3 +274,9 @@ If you want to add a new metric (say, `vo2_max` from a different source), the ro
 3. Update [AGENTS.md](AGENTS.md)'s schema section so any agent reading it knows the metric exists and how to query it.
 
 [AGENTS.md](AGENTS.md) is the source of truth for what an agent can do with this data tier. Keep it in sync with the schema; a stale AGENTS.md means agents return wrong answers silently.
+
+---
+
+## License
+
+[MIT](LICENSE) — fork it, modify it, ship your own version. No warranty.
