@@ -30,6 +30,9 @@ JsonOpt = Annotated[bool, typer.Option("--json", help="Emit machine-readable JSO
 DaysOpt = Annotated[int, typer.Option("--days", "-d")]
 SportOpt = Annotated[str | None, typer.Option("--sport", "-s")]
 
+# Standard duration windows for the mean-max power/HR curve.
+MEAN_MAX_WINDOWS_S: tuple[int, ...] = (5, 30, 60, 5 * 60, 20 * 60, 60 * 60)
+
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
@@ -477,6 +480,289 @@ def status(json: JsonOpt = False) -> None:
     console.print(table)
 
 
+def analyze(
+    activity_id: Annotated[
+        int | None,
+        typer.Argument(help="Garmin activity ID. Defaults to most recent workout."),
+    ] = None,
+    json: JsonOpt = False,
+) -> None:
+    """Detailed analysis: laps, mean-max curve, time-in-zone, aerobic decoupling."""
+    aid = athlete_id()
+    db = client()
+
+    workout = _fetch_workout(activity_id)
+    if not workout:
+        msg = f"No workout found for activity_id={activity_id}." if activity_id else "No workouts logged yet."
+        if json:
+            _emit_json({"workout": None, "error": msg})
+        else:
+            console.print(f"[red]{msg}[/red]")
+        return
+
+    workout_id = workout["id"]
+    sport = workout.get("sport")
+
+    streams_rows = _fetch_all_streams(workout_id)
+
+    laps = (
+        db.table("workout_laps")
+        .select("*")
+        .eq("workout_id", workout_id)
+        .order("lap_index")
+        .execute()
+    ).data or []
+
+    zones = _fetch_zones(aid, sport)
+
+    mean_max = _mean_max_curve(streams_rows, "power")
+    if not any(mean_max.values()):
+        mean_max = _mean_max_curve(streams_rows, "hr")
+        mean_max_metric = "hr"
+    else:
+        mean_max_metric = "power"
+
+    time_in_hr_zone = _time_in_zone(streams_rows, "hr", zones.get("hr", []))
+    time_in_power_zone = _time_in_zone(streams_rows, "power", zones.get("power", []))
+    decoupling_pct = _aerobic_decoupling(streams_rows)
+
+    payload = {
+        "workout": workout,
+        "stream_rows": len(streams_rows),
+        "laps": laps,
+        "mean_max_metric": mean_max_metric,
+        "mean_max_curve": mean_max,
+        "time_in_hr_zone_s": time_in_hr_zone,
+        "time_in_power_zone_s": time_in_power_zone,
+        "aerobic_decoupling_pct": decoupling_pct,
+        "zones": zones,
+    }
+
+    if json:
+        _emit_json(payload)
+        return
+
+    started = datetime.fromisoformat(workout["started_at"]).astimezone(_athlete_tz())
+    console.print(
+        f"[bold]{workout['sport'].title()}[/bold] — "
+        f"{started.strftime('%A %b %d, %H:%M')}  "
+        f"({_hms(workout.get('duration_s'))}, {_km(workout.get('distance_m'))})"
+    )
+    console.print(f"  Stream rows: {len(streams_rows)}  •  Laps: {len(laps)}")
+
+    if laps:
+        console.print()
+        lap_table = Table(title="Laps", show_header=True)
+        lap_table.add_column("#", justify="right")
+        lap_table.add_column("Time")
+        lap_table.add_column("Dist", justify="right")
+        lap_table.add_column("HR avg/max", justify="right")
+        lap_table.add_column("Pwr avg/np", justify="right")
+        lap_table.add_column("Pace", justify="right")
+        lap_table.add_column("Trigger")
+        for lap in laps:
+            pace = lap.get("avg_pace_s_per_km")
+            pace_str = f"{int(pace)//60}:{int(pace)%60:02d}/km" if pace else "—"
+            lap_table.add_row(
+                str(lap["lap_index"] + 1),
+                _hms(lap.get("duration_s")),
+                _km(lap.get("distance_m")),
+                f"{_show(lap.get('avg_hr'))}/{_show(lap.get('max_hr'))}",
+                f"{_show(lap.get('avg_power'))}/{_show(lap.get('normalized_power'))}",
+                pace_str,
+                _show(lap.get("lap_trigger"), ""),
+            )
+        console.print(lap_table)
+
+    if any(mean_max.values()):
+        console.print()
+        mm_table = Table(title=f"Mean-max {mean_max_metric}")
+        mm_table.add_column("Window")
+        mm_table.add_column("Best", justify="right")
+        for w, v in mean_max.items():
+            mm_table.add_row(_window_label(w), _show(v))
+        console.print(mm_table)
+
+    for label, tiz, defined in (
+        ("HR zones", time_in_hr_zone, zones.get("hr")),
+        ("Power zones", time_in_power_zone, zones.get("power")),
+    ):
+        if defined and tiz:
+            console.print()
+            tiz_table = Table(title=f"Time in {label}")
+            tiz_table.add_column("Zone")
+            tiz_table.add_column("Range")
+            tiz_table.add_column("Time", justify="right")
+            tiz_table.add_column("%", justify="right")
+            total = sum(tiz.values()) or 1
+            for zn, lo, hi in defined:
+                seconds = tiz.get(zn, 0)
+                rng = f"{_show(lo)}–{_show(hi)}"
+                pct = 100.0 * seconds / total
+                tiz_table.add_row(f"Z{zn}", rng, _hms(seconds), f"{pct:.0f}%")
+            console.print(tiz_table)
+
+    if decoupling_pct is not None:
+        console.print()
+        sign = "↓" if decoupling_pct < 0 else "↑"
+        verdict = "tight aerobic" if abs(decoupling_pct) < 5 else "decoupled" if decoupling_pct < -5 else "warming up"
+        console.print(
+            f"  Aerobic decoupling (Pw:Hr): {sign}{abs(decoupling_pct):.1f}%  ({verdict})"
+        )
+
+    if not zones.get("hr") and not zones.get("power"):
+        console.print(
+            "\n[dim]Tip: seed `training_zones` for this athlete+sport to unlock time-in-zone analysis.[/dim]"
+        )
+
+
+# ── analyze helpers ────────────────────────────────────────────────────────
+
+
+def _fetch_all_streams(workout_id: str) -> list[dict]:
+    """Page through activity_streams (PostgREST caps each page at 1000 rows)."""
+    db = client()
+    page_size = 1000
+    out: list[dict] = []
+    offset = 0
+    while True:
+        resp = (
+            db.table("activity_streams")
+            .select("bin_offset_s, hr, power, cadence, speed_m_s")
+            .eq("workout_id", workout_id)
+            .order("bin_offset_s")
+            .range(offset, offset + page_size - 1)
+            .execute()
+        )
+        chunk = resp.data or []
+        out.extend(chunk)
+        if len(chunk) < page_size:
+            break
+        offset += page_size
+    return out
+
+
+def _fetch_workout(activity_id: int | None) -> dict | None:
+    aid = athlete_id()
+    q = (
+        client()
+        .table("workouts_executed")
+        .select("*")
+        .eq("athlete_id", aid)
+    )
+    if activity_id is not None:
+        q = q.eq("garmin_activity_id", activity_id)
+    rows = q.order("started_at", desc=True).limit(1).execute()
+    return rows.data[0] if rows.data else None
+
+
+def _fetch_zones(athlete_id_: str, sport: str | None) -> dict[str, list[tuple[int, float | None, float | None]]]:
+    """Return {metric: [(zone, lower, upper), ...]} for the athlete+sport."""
+    if not sport:
+        return {}
+    rows = (
+        client()
+        .table("training_zones")
+        .select("metric, zone, lower, upper")
+        .eq("athlete_id", athlete_id_)
+        .eq("sport", sport)
+        .order("zone")
+        .execute()
+    ).data or []
+    out: dict[str, list[tuple[int, float | None, float | None]]] = {}
+    for r in rows:
+        out.setdefault(r["metric"], []).append(
+            (r["zone"], _num(r.get("lower")), _num(r.get("upper")))
+        )
+    return out
+
+
+def _mean_max_curve(rows: list[dict], field: str) -> dict[int, int | None]:
+    values = [r.get(field) for r in rows]
+    if not any(v is not None for v in values):
+        return {w: None for w in MEAN_MAX_WINDOWS_S}
+    # Replace gaps with None; rolling mean ignores windows containing any None.
+    return {w: _mean_max(values, w) for w in MEAN_MAX_WINDOWS_S}
+
+
+def _mean_max(values: list[Any], window_s: int) -> int | None:
+    """Sliding-window mean over `window_s` seconds; returns the maximum mean.
+    Treats any None inside a window as disqualifying that window."""
+    n = len(values)
+    if n < window_s:
+        return None
+    # Build cumulative sum, restarting whenever we hit a None.
+    cum: list[float | None] = [0.0] * (n + 1)
+    for i, v in enumerate(values):
+        if v is None:
+            cum[i + 1] = None
+            continue
+        prev = cum[i] if cum[i] is not None else 0.0
+        cum[i + 1] = prev + float(v)
+    best: float | None = None
+    for i in range(window_s, n + 1):
+        if cum[i] is None or cum[i - window_s] is None:
+            continue
+        # If any None landed inside the window, cum[i] would have been reset.
+        # Re-check by ensuring no None in the slice for correctness.
+        if any(v is None for v in values[i - window_s : i]):
+            continue
+        avg = (cum[i] - cum[i - window_s]) / window_s
+        if best is None or avg > best:
+            best = avg
+    return int(round(best)) if best is not None else None
+
+
+def _time_in_zone(
+    rows: list[dict],
+    field: str,
+    zones: list[tuple[int, float | None, float | None]],
+) -> dict[int, int]:
+    """Returns {zone_num: seconds_in_zone}."""
+    if not zones:
+        return {}
+    out: dict[int, int] = {}
+    for r in rows:
+        v = r.get(field)
+        if v is None:
+            continue
+        f = float(v)
+        for zn, lo, hi in zones:
+            if (lo is None or f >= lo) and (hi is None or f <= hi):
+                out[zn] = out.get(zn, 0) + 1
+                break
+    return out
+
+
+def _aerobic_decoupling(rows: list[dict]) -> float | None:
+    """Pw:Hr ratio drift, first half vs second half. Returns percent change.
+    Negative = aerobic decoupling (HR drifted up relative to power)."""
+    paired = [(r.get("hr"), r.get("power")) for r in rows]
+    paired = [(h, p) for h, p in paired if h and p]
+    if len(paired) < 600:  # need at least 10 minutes of paired data
+        return None
+    half = len(paired) // 2
+    r1 = _ratio(paired[:half])
+    r2 = _ratio(paired[half:])
+    if r1 is None or r2 is None:
+        return None
+    return (r2 - r1) / r1 * 100.0
+
+
+def _ratio(rows: list[tuple[int, int]]) -> float | None:
+    sum_hr = sum(h for h, _ in rows)
+    sum_p = sum(p for _, p in rows)
+    return sum_p / sum_hr if sum_hr else None
+
+
+def _window_label(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    return f"{seconds // 3600}h"
+
+
 def register(app: typer.Typer) -> None:
     """Mount read commands on the main typer app."""
     app.command()(briefing)
@@ -484,4 +770,5 @@ def register(app: typer.Typer) -> None:
     app.command()(last)
     app.command()(recent)
     app.command()(recovery)
+    app.command()(analyze)
     app.command()(status)

@@ -34,6 +34,7 @@ The `training-brain` CLI (installed by `pip install -e .`) is the entrypoint for
   - `training-brain last [--sport S]` — most recent completed workout.
   - `training-brain recent [--days N]` — last N days of executed workouts (default 7).
   - `training-brain recovery [--days N]` — wellness trend (default 14).
+  - `training-brain analyze [<garmin_id>]` — deep dive on a single workout: laps, mean-max power/HR curve, time-in-zone, aerobic decoupling. Defaults to most recent.
   - `training-brain status` — sync timestamps, row counts, FIT bucket size.
 
 Every read command takes `--json` for machine-readable output. Both sync profiles are idempotent.
@@ -122,7 +123,24 @@ Both write a JSON blob to stdout and exit non-zero on any per-source failure, so
 ```bash
 training-brain status      # row counts, latest sync timestamps, FIT bucket size
 training-brain briefing    # today's morning briefing — your end-to-end smoke test
+training-brain analyze     # deep dive on the most recent workout (laps, mean-max, decoupling)
 ```
+
+### 9. (Optional) Seed your training zones
+
+Time-in-zone analysis in `analyze` needs zone definitions. Insert your coach-defined HR / power / pace zones into `training_zones`:
+
+```sql
+-- example: 5-zone HR for run, replace with your own thresholds
+insert into training_zones (athlete_id, sport, metric, zone, lower, upper) values
+    ('<your-athlete-uuid>', 'run', 'hr', 1, 0,   130),
+    ('<your-athlete-uuid>', 'run', 'hr', 2, 130, 145),
+    ('<your-athlete-uuid>', 'run', 'hr', 3, 145, 160),
+    ('<your-athlete-uuid>', 'run', 'hr', 4, 160, 175),
+    ('<your-athlete-uuid>', 'run', 'hr', 5, 175, 999);
+```
+
+Skip this step if you only want lap analysis + mean-max curves; analyze falls back gracefully without zones.
 
 ## Layout
 
@@ -136,7 +154,8 @@ training_brain/
 ├── src/training_brain/
 │   ├── db.py                    # Supabase client + env loader
 │   ├── sync.py                  # CLI entrypoint; sync subcommands (intraday / daily / backfill / login-garmin)
-│   ├── query.py                 # CLI read subcommands (briefing / today / last / recent / recovery / status)
+│   ├── query.py                 # CLI read subcommands (briefing / today / last / recent / recovery / analyze / status)
+│   ├── streams.py               # FIT parser; populates activity_streams + workout_laps on every sync
 │   └── ingestion/
 │       ├── garmin.py
 │       ├── trainingpeaks.py

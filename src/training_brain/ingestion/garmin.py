@@ -25,6 +25,7 @@ from typing import Any
 
 from garminconnect import Garmin
 
+from training_brain import streams
 from training_brain.db import athlete_id, client, settings
 
 
@@ -69,6 +70,7 @@ class SyncResult:
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     activities_ingested: int = 0
     fit_files_uploaded: int = 0
+    streams_processed: int = 0
     wellness_days_touched: int = 0
     errors: list[str] = field(default_factory=list)
 
@@ -134,9 +136,11 @@ def sync_daily(days_back: int = 1) -> SyncResult:
             result.errors.append(f"wellness {d}: {e}")
     start = today - timedelta(days=days_back + 2)
     try:
-        n_act, n_fit = _ingest_activities(start, today)
+        n_act, n_fit, n_streams, act_errors = _ingest_activities(start, today)
         result.activities_ingested = n_act
         result.fit_files_uploaded = n_fit
+        result.streams_processed = n_streams
+        result.errors.extend(act_errors)
     except Exception as e:
         result.errors.append(f"activities: {e}")
     return result
@@ -155,9 +159,11 @@ def sync_backfill(since: date) -> SyncResult:
             result.errors.append(f"wellness {cur}: {e}")
         cur += timedelta(days=1)
     try:
-        n_act, n_fit = _ingest_activities(since, today)
+        n_act, n_fit, n_streams, act_errors = _ingest_activities(since, today)
         result.activities_ingested = n_act
         result.fit_files_uploaded = n_fit
+        result.streams_processed = n_streams
+        result.errors.extend(act_errors)
     except Exception as e:
         result.errors.append(f"activities: {e}")
     return result
@@ -303,11 +309,26 @@ def _extract_wellness_fields(kind: str, raw: Any) -> dict[str, Any]:
 # ── Activities ──────────────────────────────────────────────────────────────
 
 
-def _ingest_activities(start: date, end: date) -> tuple[int, int]:
+def _ingest_activities(start: date, end: date) -> tuple[int, int, int, list[str]]:
     aid = athlete_id()
     db = client()
     n_activities = 0
     n_fit = 0
+    n_streams = 0
+    errors: list[str] = []
+
+    # Prefetch existing FIT paths so we skip re-downloading on re-runs.
+    existing = (
+        db.table("workouts_executed")
+        .select("garmin_activity_id, fit_file_path")
+        .eq("athlete_id", aid)
+        .execute()
+    )
+    fit_by_garmin_id: dict[int, str] = {
+        r["garmin_activity_id"]: r["fit_file_path"]
+        for r in (existing.data or [])
+        if r.get("garmin_activity_id") and r.get("fit_file_path")
+    }
 
     for raw in _list_activities(start, end):
         garmin_id = raw.get("activityId")
@@ -321,21 +342,34 @@ def _ingest_activities(start: date, end: date) -> tuple[int, int]:
             "payload": raw,
         }).execute()
 
-        fit_path: str | None = None
-        try:
-            fit_path = _store_fit_file(garmin_id, aid)
-            n_fit += 1
-        except Exception:
-            fit_path = None
+        fit_path: str | None = fit_by_garmin_id.get(garmin_id)
+        if fit_path is None:
+            try:
+                fit_path = _store_fit_file(garmin_id, aid)
+                n_fit += 1
+            except Exception as e:
+                errors.append(f"fit {garmin_id}: {e}")
+                fit_path = None
 
         norm = _normalize_activity(raw, fit_path)
-        db.table("workouts_executed").upsert(
+        upserted = db.table("workouts_executed").upsert(
             norm,
             on_conflict="athlete_id,garmin_activity_id",
         ).execute()
         n_activities += 1
 
-    return n_activities, n_fit
+        workout_id = (upserted.data or [{}])[0].get("id")
+        if workout_id and fit_path:
+            try:
+                sr = streams.ingest_streams(workout_id, fit_path)
+                if sr.errors:
+                    errors.extend(f"streams {garmin_id}: {e}" for e in sr.errors)
+                if sr.stream_rows or sr.lap_rows:
+                    n_streams += 1
+            except Exception as e:
+                errors.append(f"streams {garmin_id}: {e}")
+
+    return n_activities, n_fit, n_streams, errors
 
 
 def _list_activities(start: date, end: date) -> list[dict]:

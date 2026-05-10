@@ -48,7 +48,9 @@ Tables (high level):
 - `raw_garmin_events`, `raw_tp_calendar`, `raw_strava_activities` — append-only audit, never mutated
 - `workouts_planned`, `workouts_executed` — canonical, deduped, joined by `(athlete_id, date, sport)`
 - `wellness_daily` — one row per athlete per day; columns updated by intraday or daily profile depending on metric
-- `activity_streams` — partitioned summary stream metrics
+- `activity_streams` — time-binned per-workout streams (HR, power, cadence, speed, altitude, GPS) at 1Hz default. Source of detailed-analysis queries; populated by `streams.ingest_streams` after FIT upload.
+- `workout_laps` — per-lap summary records from FIT files; captures interval boundaries, brick transitions, swim lengths.
+- `training_zones` — coach-defined HR/power/pace zones per athlete per sport. Optional; powers time-in-zone analysis when populated.
 
 ## Secrets
 
@@ -71,8 +73,9 @@ training_brain/
 │   │   ├── garmin.py
 │   │   ├── trainingpeaks.py
 │   │   └── strava.py
+│   ├── streams.py                  # FIT parser → activity_streams + workout_laps
 │   ├── sync.py                     # CLI: write subcommands (intraday | daily | backfill | login-garmin)
-│   ├── query.py                    # CLI: read subcommands (briefing | today | last | recent | recovery | status)
+│   ├── query.py                    # CLI: read subcommands (briefing | today | last | recent | recovery | analyze | status)
 │   └── db.py
 ├── db/
 │   └── migrations/
@@ -105,10 +108,12 @@ Live and exercised against real data. Build phases:
 6. ✅ Backfill (12-month default)
 7. ✅ Strava ingestion (code-complete; not yet wired up — credentials optional)
 8. ✅ Skill file (`skills/training-brain.md`)
-9. ✅ Read CLI: briefing / today / last / recent / recovery / status (`src/training_brain/query.py`)
+9. ✅ Read CLI: briefing / today / last / recent / recovery / analyze / status (`src/training_brain/query.py`)
+10. ✅ Workout-detail tier: FIT parser, `activity_streams` + `workout_laps` populated on every sync (`src/training_brain/streams.py`); `analyze` CLI surfaces lap tables, mean-max power/HR curves, and aerobic decoupling.
 
 **Remaining:**
 - Schedule the OpenClaw cron (intraday + daily) on the production host.
 - TP description parser to recover `duration_planned_s` and `tss_planned` from event description text — until then, both fields are unreliable on all-day iCal events. Documented in the skill file under "Known data-quality gaps."
+- Seed `training_zones` (HR + power + pace) from the athlete's coach-defined zones to unlock time-in-zone analysis. Currently optional; analyze falls back gracefully when empty.
 
 Update this section as phases complete.

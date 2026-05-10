@@ -64,7 +64,13 @@ One row per athlete per day. Composite PK `(athlete_id, date)`.
 - Freshness: `intraday_updated_at`, `daily_updated_at` — use these to tell the user how stale a value is.
 
 ### `activity_streams`
-Time-binned summary streams (HR, power, cadence, speed, altitude, lat/lon) keyed on `(workout_id, bin_offset_s)`. For full-resolution analysis, fetch the FIT from Storage and parse on demand.
+Time-binned per-workout streams keyed on `(workout_id, bin_offset_s)`. Default `bin_size_s = 1` so this is essentially the 1Hz FIT record stream. Columns: `hr`, `power`, `cadence`, `speed_m_s`, `altitude_m`, `lat`, `lon`. Populated automatically on every sync. For longer workouts, paginate with `range()` — PostgREST caps each page at 1000 rows.
+
+### `workout_laps`
+Per-lap summary records pulled from FIT lap messages, keyed on `(workout_id, lap_index)`. Captures interval boundaries — manual lap presses, distance/time auto-laps, swim pool lengths, brick transitions. Columns include `started_at`, `duration_s` (active timer time, matches `workouts_executed.duration_s` convention), `distance_m`, `avg_hr` / `max_hr`, `avg_power` / `max_power` / `normalized_power`, `avg_cadence`, `avg_pace_s_per_km`, `intensity` (`active`/`rest`/`warmup`/`cooldown`), `lap_trigger` (`manual`/`distance`/`time`/`session_end`).
+
+### `training_zones`
+Coach-defined zones per `(athlete_id, sport, metric, zone)`. `metric` is `'hr'`, `'power'`, or `'pace_s_per_km'`. May be empty — fall back to %FTP/%LTHR heuristics if so, but coach zones are authoritative when present.
 
 ### `raw_garmin_events`, `raw_tp_calendar`, `raw_strava_activities`
 Append-only audit. Don't query these for normal user questions; use them only when canonical fields are missing and you need to inspect the original payload.
@@ -192,6 +198,94 @@ limit 14;
 
 The 90-day warmup matters — without it CTL is artificially low at the start of the window. If the user asks about CTL/ATL near the start of the data range, mention that it's still warming up.
 
+## Deep workout analysis
+
+For "tell me about that workout" / "how hard was that ride" / "compare these intervals" questions, use the streams + laps tables. Two access paths:
+
+### Shell-access path (preferred)
+
+```
+training-brain analyze <garmin_activity_id> --json
+```
+
+Returns the full analysis: lap table, mean-max curve at 5s/30s/1m/5m/20m/1h, time-in-zone (if zones seeded), aerobic decoupling. Cheaper than running multiple SQL queries.
+
+### SQL path (when shell isn't available)
+
+**Lap-by-lap breakdown:**
+```sql
+select lap_index, duration_s, distance_m,
+       avg_hr, max_hr, avg_power, normalized_power,
+       avg_cadence, avg_pace_s_per_km, intensity, lap_trigger
+from workout_laps
+where workout_id = $1
+order by lap_index;
+```
+
+**Mean-max power curve** (best 5s, 30s, 1m, 5m, 20m, 60m). Postgres window functions:
+```sql
+with bins as (
+    select bin_offset_s, power
+    from activity_streams
+    where workout_id = $1 and power is not null
+    order by bin_offset_s
+)
+select 'peak_5s' as window, max(avg_p)::int as best from (
+    select avg(power) over (order by bin_offset_s rows between current row and 4 following) as avg_p
+    from bins
+) t
+union all
+select 'peak_5m', max(avg_p)::int from (
+    select avg(power) over (order by bin_offset_s rows between current row and 299 following) as avg_p
+    from bins
+) t
+union all
+select 'peak_20m', max(avg_p)::int from (
+    select avg(power) over (order by bin_offset_s rows between current row and 1199 following) as avg_p
+    from bins
+) t;
+```
+
+Be aware the rolling avg includes the bin's neighbors — windowing by `bin_offset_s` assumes 1Hz bins (the default). If `bin_size_s != 1` for a workout, scale the row count.
+
+**Time-in-zone (HR):**
+```sql
+with stream as (
+    select s.hr,
+           tz.zone
+    from activity_streams s
+    join training_zones tz
+      on tz.athlete_id = $athlete and tz.sport = $sport and tz.metric = 'hr'
+     and (tz.lower is null or s.hr >= tz.lower)
+     and (tz.upper is null or s.hr <= tz.upper)
+    where s.workout_id = $1 and s.hr is not null
+)
+select zone, count(*) as seconds
+from stream
+group by zone
+order by zone;
+```
+
+**Aerobic decoupling (Pw:Hr drift, first half vs second half):**
+```sql
+with halves as (
+    select case
+             when bin_offset_s < (select max(bin_offset_s)/2 from activity_streams where workout_id = $1)
+             then 'first' else 'second'
+           end as half,
+           hr, power
+    from activity_streams
+    where workout_id = $1 and hr is not null and power is not null
+)
+select half, sum(power)::numeric / nullif(sum(hr), 0) as pw_hr_ratio
+from halves
+group by half;
+```
+
+A 5%+ drop in second-half ratio = meaningful aerobic decoupling. Useful signal for whether endurance has caught up to the workout intensity.
+
+**Pagination warning:** `activity_streams` for long workouts (5h+ rides) easily exceeds PostgREST's 1000-row default page. Use `range(0, N)` with N higher, or paginate. The `analyze` CLI handles this for you.
+
 ## Known data-quality gaps (read before quoting numbers)
 
 The data tier is live but a few extractors are still rough — call these out when relevant rather than presenting bad numbers as fact.
@@ -238,7 +332,7 @@ training-brain briefing --json
 
 Returned shape: `{ date, wellness, wellness_fallback_to_yesterday, yesterday, plan, load_14d_avg_tss, anomalies }`. The CLI already runs the anomaly checks below and returns them pre-computed, so if you have shell access you can skip straight to the narrative step.
 
-The CLI also exposes `today`, `last [--sport S]`, `recent [--days N]`, `recovery [--days N]`, and `status` — same rule, all support `--json`. Prefer these over hand-written SQL when shell access is available.
+The CLI also exposes `today`, `last [--sport S]`, `recent [--days N]`, `recovery [--days N]`, `analyze [<garmin_id>]`, and `status` — same rule, all support `--json`. Prefer these over hand-written SQL when shell access is available; the SQL templates in this file are the fallback for MCP-only contexts.
 
 **If you only have the Supabase MCP**, run the CTE below. Substitute the athlete UUID for `$1` and the local TZ for `'America/Los_Angeles'`:
 
