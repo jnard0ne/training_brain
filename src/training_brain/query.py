@@ -524,6 +524,14 @@ def analyze(
 
     time_in_hr_zone = _time_in_zone(streams_rows, "hr", zones.get("hr", []))
     time_in_power_zone = _time_in_zone(streams_rows, "power", zones.get("power", []))
+    # Pace zones: derive from speed_m_s. Skip zero speeds (stops, autopause).
+    pace_rows = [
+        {"pace_s_per_km": (1000.0 / r["speed_m_s"]) if r.get("speed_m_s") else None}
+        for r in streams_rows
+    ]
+    time_in_pace_zone = _time_in_zone(
+        pace_rows, "pace_s_per_km", zones.get("pace_s_per_km", [])
+    )
     decoupling_pct = _aerobic_decoupling(streams_rows)
 
     payload = {
@@ -534,6 +542,7 @@ def analyze(
         "mean_max_curve": mean_max,
         "time_in_hr_zone_s": time_in_hr_zone,
         "time_in_power_zone_s": time_in_power_zone,
+        "time_in_pace_zone_s": time_in_pace_zone,
         "aerobic_decoupling_pct": decoupling_pct,
         "zones": zones,
     }
@@ -583,9 +592,10 @@ def analyze(
             mm_table.add_row(_window_label(w), _show(v))
         console.print(mm_table)
 
-    for label, tiz, defined in (
-        ("HR zones", time_in_hr_zone, zones.get("hr")),
-        ("Power zones", time_in_power_zone, zones.get("power")),
+    for label, tiz, defined, metric in (
+        ("HR zones", time_in_hr_zone, zones.get("hr"), "hr"),
+        ("Power zones", time_in_power_zone, zones.get("power"), "power"),
+        ("Pace zones", time_in_pace_zone, zones.get("pace_s_per_km"), "pace_s_per_km"),
     ):
         if defined and tiz:
             console.print()
@@ -597,7 +607,7 @@ def analyze(
             total = sum(tiz.values()) or 1
             for zn, lo, hi in defined:
                 seconds = tiz.get(zn, 0)
-                rng = f"{_show(lo)}–{_show(hi)}"
+                rng = _fmt_zone_range(lo, hi, metric)
                 pct = 100.0 * seconds / total
                 tiz_table.add_row(f"Z{zn}", rng, _hms(seconds), f"{pct:.0f}%")
             console.print(tiz_table)
@@ -753,6 +763,42 @@ def _ratio(rows: list[tuple[int, int]]) -> float | None:
     sum_hr = sum(h for h, _ in rows)
     sum_p = sum(p for _, p in rows)
     return sum_p / sum_hr if sum_hr else None
+
+
+def _fmt_threshold(x: Any) -> str:
+    """Render a zone bound: drop trailing .0 on whole numbers, '—' for None."""
+    if x is None:
+        return "—"
+    try:
+        f = float(x)
+        return str(int(f)) if f == int(f) else f"{f:g}"
+    except (TypeError, ValueError):
+        return str(x)
+
+
+def _fmt_pace(s_per_km: Any) -> str:
+    """Render seconds-per-km as M:SS/km. None → '—'."""
+    if s_per_km is None:
+        return "—"
+    try:
+        s = int(round(float(s_per_km)))
+    except (TypeError, ValueError):
+        return str(s_per_km)
+    return f"{s // 60}:{s % 60:02d}/km"
+
+
+def _fmt_zone_range(lo: Any, hi: Any, metric: str) -> str:
+    """Format a zone's bound range. Open-ended bounds render as ≤X / ≥X.
+    For pace zones we display slow→fast (TP convention) so the formatted
+    string puts hi (slower) before lo (faster)."""
+    fmt = _fmt_pace if metric == "pace_s_per_km" else _fmt_threshold
+    if lo is None and hi is not None:
+        return f"≤{fmt(hi)}"
+    if lo is not None and hi is None:
+        return f"≥{fmt(lo)}"
+    if metric == "pace_s_per_km":
+        return f"{fmt(hi)}–{fmt(lo)}"
+    return f"{fmt(lo)}–{fmt(hi)}"
 
 
 def _window_label(seconds: int) -> str:
