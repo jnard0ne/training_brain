@@ -88,7 +88,9 @@ def _sync(after: datetime) -> StravaSyncResult:
                 "payload": payload,
             }).execute()
 
-            sport = SPORT_MAP.get(str(getattr(activity, "type", "")), "other")
+            raw_sport = getattr(activity, "sport_type", None) or getattr(activity, "type", None)
+            raw_sport_str = getattr(raw_sport, "root", str(raw_sport)) if raw_sport is not None else ""
+            sport = SPORT_MAP.get(raw_sport_str, "other")
             started_at = activity.start_date.astimezone(timezone.utc).isoformat()
 
             match_id = _find_garmin_match(started_at, sport)
