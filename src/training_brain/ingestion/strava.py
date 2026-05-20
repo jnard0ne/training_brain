@@ -58,13 +58,13 @@ def sync_backfill(since: date) -> StravaSyncResult:
     return _sync(after=datetime.combine(since, datetime.min.time(), tzinfo=timezone.utc))
 
 
-def _sync(after: datetime) -> StravaSyncResult:
+def authed_client() -> Client:
+    """Return a stravalib Client with a fresh access token."""
     s = settings()
     if not (s.strava_client_id and s.strava_client_secret and s.strava_refresh_token):
         raise RuntimeError(
             "STRAVA_CLIENT_ID/STRAVA_CLIENT_SECRET/STRAVA_REFRESH_TOKEN must be set in .env"
         )
-
     sc = Client()
     token = sc.refresh_access_token(
         client_id=int(s.strava_client_id),
@@ -73,6 +73,11 @@ def _sync(after: datetime) -> StravaSyncResult:
     )
     access_token = token["access_token"] if isinstance(token, dict) else token.access_token
     sc.access_token = access_token
+    return sc
+
+
+def _sync(after: datetime) -> StravaSyncResult:
+    sc = authed_client()
 
     result = StravaSyncResult()
     db = supabase_client()
@@ -93,10 +98,11 @@ def _sync(after: datetime) -> StravaSyncResult:
             sport = SPORT_MAP.get(raw_sport_str, "other")
             started_at = activity.start_date.astimezone(timezone.utc).isoformat()
 
+            relative_effort = _maybe_int(getattr(activity, "suffer_score", None))
             match_id = _find_garmin_match(started_at, sport)
             if match_id:
                 db.table("workouts_executed").update(
-                    {"strava_activity_id": activity.id}
+                    {"strava_activity_id": activity.id, "relative_effort": relative_effort}
                 ).eq("id", match_id).execute()
                 result.matched_to_garmin += 1
             else:
@@ -113,6 +119,7 @@ def _sync(after: datetime) -> StravaSyncResult:
                         "avg_power": _maybe_int(getattr(activity, "average_watts", None)),
                         "elevation_gain_m": getattr(activity, "total_elevation_gain", None),
                         "calories": getattr(activity, "calories", None),
+                        "relative_effort": relative_effort,
                         "notes": getattr(activity, "name", None),
                     },
                     on_conflict="athlete_id,strava_activity_id",

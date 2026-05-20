@@ -6,7 +6,9 @@ OpenClaw, who can call `training-brain briefing --json` instead of issuing
 SQL through the Supabase MCP).
 
 All reads go through the supabase-py PostgREST client (same auth as the sync
-job — modern secret key from `.env`). Nothing here writes.
+job — modern secret key from `.env`). The one exception is
+`strava_relative_effort`, which does a live Strava pull and enriches matched
+workouts_executed rows with the latest `relative_effort` value.
 
 Mounted on the main typer app via `register(app)` from sync.py.
 """
@@ -809,6 +811,151 @@ def _window_label(seconds: int) -> str:
     return f"{seconds // 3600}h"
 
 
+def strava_relative_effort(
+    days: Annotated[
+        int | None,
+        typer.Option("--days", "-d", help="Roll up by local-tz date over the last N days."),
+    ] = None,
+    activities: Annotated[
+        int | None,
+        typer.Option("--activities", "-a", help="Show the N most recent Strava activities."),
+    ] = None,
+    json: JsonOpt = False,
+) -> None:
+    """Pull Strava Relative Effort (suffer_score) per activity or per day.
+
+    Also writes `relative_effort` back to any matching `workouts_executed` row
+    (matched on `strava_activity_id`). Default: --days 7.
+    """
+    if days is not None and activities is not None:
+        raise typer.BadParameter("--days and --activities are mutually exclusive.")
+    if days is None and activities is None:
+        days = 7
+
+    from training_brain.ingestion import strava  # lazy: import only when invoked
+
+    sc = strava.authed_client()
+    tz = _athlete_tz()
+
+    if activities is not None:
+        iterator = sc.get_activities(limit=activities)
+    else:
+        after = datetime.combine(_local_today() - timedelta(days=days - 1), datetime.min.time(), tz)
+        iterator = sc.get_activities(after=after.astimezone())
+
+    rows: list[dict[str, Any]] = []
+    for a in iterator:
+        started = a.start_date.astimezone(tz) if a.start_date else None
+        raw_sport = getattr(a, "sport_type", None) or getattr(a, "type", None)
+        raw_sport_str = (
+            getattr(raw_sport, "root", str(raw_sport)) if raw_sport is not None else ""
+        )
+        rows.append({
+            "strava_activity_id": a.id,
+            "name": getattr(a, "name", None),
+            "sport": strava.SPORT_MAP.get(raw_sport_str, "other"),
+            "started_at_local": started,
+            "date": started.date() if started else None,
+            "relative_effort": _maybe_int_local(getattr(a, "suffer_score", None)),
+        })
+
+    persisted = _persist_relative_effort(rows)
+
+    if days is not None:
+        payload = _build_days_rollup(rows, days, tz)
+        _emit_relative_effort_days(payload, persisted, json)
+    else:
+        _emit_relative_effort_activities(rows, persisted, json)
+
+
+def _maybe_int_local(v: Any) -> int | None:
+    if v is None:
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _persist_relative_effort(rows: list[dict[str, Any]]) -> int:
+    """Update workouts_executed.relative_effort for rows already in the DB.
+
+    Returns the number of rows updated. Does not insert; row creation is owned
+    by the Strava sync path.
+    """
+    db = client()
+    aid = athlete_id()
+    updated = 0
+    for r in rows:
+        if r["relative_effort"] is None:
+            continue
+        resp = (
+            db.table("workouts_executed")
+            .update({"relative_effort": r["relative_effort"]})
+            .eq("athlete_id", aid)
+            .eq("strava_activity_id", r["strava_activity_id"])
+            .execute()
+        )
+        if resp.data:
+            updated += 1
+    return updated
+
+
+def _build_days_rollup(
+    rows: list[dict[str, Any]], days: int, tz: ZoneInfo
+) -> list[dict[str, Any]]:
+    today_d = datetime.now(tz).date()
+    buckets: dict[date, dict[str, Any]] = {
+        today_d - timedelta(days=i): {"date": today_d - timedelta(days=i), "total": 0, "activities": 0}
+        for i in range(days)
+    }
+    for r in rows:
+        d = r["date"]
+        if d not in buckets:
+            continue
+        buckets[d]["activities"] += 1
+        if r["relative_effort"] is not None:
+            buckets[d]["total"] += r["relative_effort"]
+    return sorted(buckets.values(), key=lambda x: x["date"], reverse=True)
+
+
+def _emit_relative_effort_days(
+    payload: list[dict[str, Any]], persisted: int, json: bool
+) -> None:
+    if json:
+        _emit_json({"rows_persisted": persisted, "days": payload})
+        return
+    table = Table(title=f"Relative Effort — last {len(payload)} days")
+    table.add_column("Date")
+    table.add_column("Activities", justify="right")
+    table.add_column("Total RE", justify="right")
+    for r in payload:
+        table.add_row(r["date"].isoformat(), str(r["activities"]), str(r["total"]))
+    console.print(table)
+    console.print(f"[dim]{persisted} workouts_executed rows updated.[/dim]")
+
+
+def _emit_relative_effort_activities(
+    rows: list[dict[str, Any]], persisted: int, json: bool
+) -> None:
+    if json:
+        _emit_json({"rows_persisted": persisted, "activities": rows})
+        return
+    if not rows:
+        console.print("[dim]No Strava activities returned.[/dim]")
+        return
+    table = Table(title=f"Relative Effort — {len(rows)} activities")
+    table.add_column("When")
+    table.add_column("Sport")
+    table.add_column("Name", overflow="fold")
+    table.add_column("RE", justify="right")
+    for r in rows:
+        when = r["started_at_local"].strftime("%a %b %d %H:%M") if r["started_at_local"] else "—"
+        table.add_row(when, r["sport"], r.get("name") or "", _show(r["relative_effort"]))
+    console.print(table)
+    console.print(f"[dim]{persisted} workouts_executed rows updated.[/dim]")
+
+
 def register(app: typer.Typer) -> None:
     """Mount read commands on the main typer app."""
     app.command()(briefing)
@@ -818,3 +965,4 @@ def register(app: typer.Typer) -> None:
     app.command()(recovery)
     app.command()(analyze)
     app.command()(status)
+    app.command("strava_relative_effort")(strava_relative_effort)

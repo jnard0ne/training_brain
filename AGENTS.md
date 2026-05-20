@@ -34,6 +34,7 @@ The `training-brain` CLI is installed in the project venv. Every read command ta
 | `training-brain recent [--days N]` | "what did I do this week", "last 5 days of workouts" |
 | `training-brain recovery [--days N]` | "how's my recovery", "show me my HRV trend" |
 | `training-brain analyze [<garmin_activity_id>]` | "tell me about that workout", "deep dive on yesterday's ride", "show me lap splits" — defaults to most recent |
+| `training-brain strava_relative_effort --days N \| --activities N` | "what's my Relative Effort been", "RE for the last 14 days", "RE on my last 5 rides". Hits Strava live and backfills `workouts_executed.relative_effort` along the way — flags are mutually exclusive, defaults to `--days 7`. |
 | `training-brain status` | "is the data up to date", "did the sync run" |
 
 Returns from `--json` are pre-shaped for narration (anomaly flags pre-computed, time-in-zone tables ready, etc.). Prefer these over hand-written SQL when shell access is available; SQL is the fallback for MCP-only contexts.
@@ -65,6 +66,7 @@ One row per TP iCal event.
 One row per real workout, deduped across Garmin/Strava.
 - `id`, `athlete_id`, `started_at` (timestamptz UTC), `sport`, `duration_s`, `distance_m`
 - `tss`, `intensity_factor`, `avg_hr`, `max_hr`, `avg_power`, `normalized_power`, `avg_cadence`, `avg_pace_s_per_km`, `elevation_gain_m`, `calories`
+- `relative_effort` — Strava's HR-derived effort score (their API field `suffer_score`, branded "Relative Effort"). Populated when the row has a matched Strava activity with HR. NULL for power-only Garmin rides, manual entries with no HR, or any workout that never made it to Strava.
 - `garmin_activity_id`, `strava_activity_id`, `tp_workout_id` — cross-source IDs
 - `fit_file_path` — path inside the `fit-files` Storage bucket (`<athlete_id>/<garmin_id>.zip`)
 - `planned_workout_id` — FK; **often NULL**. Auto-match isn't run; prefer the date+sport join under "Plan ↔ execution matching."

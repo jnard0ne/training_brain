@@ -84,7 +84,7 @@ training-brain --help
 
 1. Sign in to [supabase.com](https://supabase.com), click **New project**, give it a name and a strong database password (you won't need it for this project, but Supabase requires one). Pick a region close to you.
 2. While it provisions, open the **SQL Editor** tab.
-3. Apply the migrations in `db/migrations/` **in order** (0001, 0002, …). For each file: open it in your text editor, paste the contents into the SQL Editor, click **Run**. There are 6 migrations as of this writing.
+3. Apply the migrations in `db/migrations/` **in order** (0001, 0002, …). For each file: open it in your text editor, paste the contents into the SQL Editor, click **Run**. There are 7 migrations as of this writing.
 4. After the migrations run, seed your athlete row in the SQL Editor:
    ```sql
    insert into athletes (name, timezone)
@@ -240,6 +240,7 @@ A few CLI commands worth knowing for ad-hoc checks:
 | `training-brain recent --days 7` | Last week's workouts as a table |
 | `training-brain recovery --days 14` | Wellness trend |
 | `training-brain analyze [<garmin_id>]` | Lap table, mean-max curve, time-in-zone, aerobic decoupling for one workout |
+| `training-brain strava_relative_effort --days N \| --activities N` | Strava Relative Effort (suffer_score) rolled up by day or listed per activity; also backfills `workouts_executed.relative_effort` |
 | `training-brain status` | Sync timestamps, row counts, FIT bucket size |
 
 Every read command takes `--json` for piping into other tooling.
