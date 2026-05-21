@@ -32,6 +32,7 @@ A working end-to-end data tier with:
 - **Time-in-zone analysis** — once you seed your zones, every analysis surfaces zone distributions for HR, power, and pace.
 - **Aerobic decoupling, mean-max curves, lap-by-lap splits** — out of the box.
 - **An [AGENTS.md](AGENTS.md) file** any AI agent can read to answer training questions — morning briefings, plan vs. actual, recovery summaries, workout deep-dives.
+- **A local web UI** (`training-brain web`) for connecting and re-authenticating Garmin, TrainingPeaks, and Strava without touching `.env` by hand.
 
 What it isn't:
 
@@ -247,6 +248,42 @@ Every read command takes `--json` for piping into other tooling.
 
 ---
 
+## Local web UI
+
+A small FastAPI + React app for the parts of this project that benefit from a
+screen — currently re-authentication, with data exploration views to come.
+
+```bash
+cd web && npm install && npm run build && cd ..    # one-time
+training-brain web                                  # then open http://localhost:8765
+```
+
+Flags: `--port 8765`, `--host 127.0.0.1`, `--reload`. Binds to loopback only —
+there's no auth layer on top, so don't expose it.
+
+For frontend iteration, run the Vite dev server alongside the backend:
+
+```bash
+training-brain web                  # terminal 1 — :8765
+cd web && npm run dev               # terminal 2 — :5173, proxies /api → :8765
+```
+
+What's in the UI today:
+
+- **Garmin Connect** — email + password + MFA prompt; token files cached to
+  `~/.garminconnect`. Shows "Last verified <time>" so you can tell when the
+  credentials were last confirmed working.
+- **TrainingPeaks** — paste a `webcal://` or `https://` iCal URL; the backend
+  normalizes, saves to `.env`, and probes the feed (status line shows the
+  current event count). Useful for swapping in a fresh personal link without
+  hand-editing `.env`.
+- **Strava** — OAuth round-trip; refresh token is written back into `.env`
+  on success and live-verified against Strava on every page load. Client
+  ID / secret can also be set or rotated from the UI. Strava's app settings
+  must list `localhost` as the Authorization Callback Domain.
+
+---
+
 ## Caveats
 
 - **Garmin auth is fragile by nature.** Garmin can change their login flow at any time and break the underlying library. As of May 2026 the project uses [`cyberjunky/python-garminconnect`](https://github.com/cyberjunky/python-garminconnect) (the previous library, `garth`, was deprecated in March 2026 after Garmin added Cloudflare protections). If your sync starts failing with auth errors after a Garmin update, check the upstream library for a new release.
@@ -261,11 +298,13 @@ Every read command takes `--json` for piping into other tooling.
 
 The codebase is a few hundred lines of straightforward Python. The main pieces:
 
-- `src/training_brain/sync.py` — write CLI (sync subcommands, Garmin login)
+- `src/training_brain/sync.py` — write CLI (sync subcommands, Garmin login, `web` launcher)
 - `src/training_brain/query.py` — read CLI (briefing, today, last, recent, recovery, analyze, status)
 - `src/training_brain/streams.py` — FIT parser; populates `activity_streams` and `workout_laps`
 - `src/training_brain/ingestion/` — per-source ingesters (Garmin, TrainingPeaks, Strava)
+- `src/training_brain/web/` — FastAPI backend for the local web UI (auth flows, env writer)
 - `src/training_brain/db.py` — Supabase client + env loader
+- `web/` — Vite + React + TypeScript + Tailwind frontend; built bundle is served by FastAPI
 - `db/migrations/` — SQL migrations, applied in order
 
 If you want to add a new metric (say, `vo2_max` from a different source), the rough recipe is:

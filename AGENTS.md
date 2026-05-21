@@ -22,6 +22,13 @@ Don't hedge by averaging across sources. Pick the authoritative one and cite it 
 
 Two paths; pick the cheaper one available to you.
 
+> **Aside — local web UI.** `training-brain web` launches a FastAPI + React app
+> on `http://localhost:8765` for human-facing tasks: connecting and
+> re-authenticating Garmin / TrainingPeaks / Strava, viewing connection status.
+> It's not a query interface and you shouldn't drive it programmatically;
+> redirect the human there if they're stuck on auth (Garmin MFA loop, Strava
+> token expired, TP iCal URL changed).
+
 ### Shell access — preferred
 
 The `training-brain` CLI is installed in the project venv. Every read command takes `--json` for machine-readable output:

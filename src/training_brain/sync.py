@@ -36,6 +36,17 @@ def login_garmin() -> None:
 
 
 @app.command()
+def web(
+    host: Annotated[str, typer.Option("--host", help="Bind address (default: 127.0.0.1)")] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port", help="Port (default: 8765)")] = 8765,
+    reload: Annotated[bool, typer.Option("--reload/--no-reload", help="Auto-reload on code changes")] = False,
+) -> None:
+    """Start the local web UI."""
+    import uvicorn
+    uvicorn.run("training_brain.web.app:app", host=host, port=port, reload=reload)
+
+
+@app.command()
 def intraday() -> None:
     """Refresh fast-changing wellness (body battery, stress, training readiness)."""
     result = garmin.sync_intraday()
