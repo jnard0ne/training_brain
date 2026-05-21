@@ -82,21 +82,10 @@ def range_payload(start: date, end: date) -> dict[str, Any]:
         key = (start + timedelta(days=d_off)).isoformat()
         days[key] = {"planned": [], "executed": []}
 
-    # Bucket planned rows by date, then dedupe per-day. The TP iCal feed
-    # re-issues UIDs across syncs (defeating the source_uid upsert key) and
-    # mutates descriptions/durations over time, so the same workout shows up
-    # as multiple rows with slightly different content. We collapse by
-    # (sport, first-line-of-description) and keep the row with the best
-    # planned-duration data. Tracked as a real data-layer fix separately;
-    # this keeps the calendar usable.
-    by_day_planned: dict[str, list[dict]] = {}
     for row in planned_rows:
         key = row["date"]
         if key in days:
-            by_day_planned.setdefault(key, []).append(row)
-    for day_key, rows in by_day_planned.items():
-        for canonical in _dedupe_planned(rows):
-            days[day_key]["planned"].append(_shape_planned(canonical))
+            days[key]["planned"].append(_shape_planned(row))
 
     for row in executed_rows:
         started = row.get("started_at")
@@ -167,41 +156,6 @@ def _to_float(v: Any) -> float | None:
 # rather than surface it in the calendar UI.
 
 _PLANNED_TIME_RE = re.compile(r"Planned Time[:\s]+(\d+):(\d{2})", re.IGNORECASE)
-
-
-def _dedupe_planned(rows: list[dict]) -> list[dict]:
-    """Collapse near-duplicate planned rows from TP UID regeneration.
-
-    Group by (sport, lowercased first line of description) — that line is the
-    workout's human title and stays stable across re-syncs while
-    `duration_planned_s` and the rest of the description don't. From each
-    group, return the row with the most useful planned-duration data so
-    compliance scoring downstream lands on the best version.
-    """
-    groups: dict[tuple, list[dict]] = {}
-    order: list[tuple] = []
-    for row in rows:
-        key = (row.get("sport") or "", _first_line(row.get("description")))
-        if key not in groups:
-            order.append(key)
-        groups.setdefault(key, []).append(row)
-    return [max(groups[k], key=_planned_duration_score) for k in order]
-
-
-def _first_line(s: str | None) -> str:
-    if not s:
-        return ""
-    return s.split("\n", 1)[0].strip().lower()
-
-
-def _planned_duration_score(row: dict) -> int:
-    """Higher = better source of planned-duration info for compliance."""
-    dur = row.get("duration_planned_s")
-    if dur and 0 < dur < 86400:
-        return 2  # real DTEND-derived duration
-    if _PLANNED_TIME_RE.search(row.get("description") or ""):
-        return 1  # parseable "Planned Time: H:MM" in description
-    return 0  # nothing usable
 
 
 def _match_and_score(

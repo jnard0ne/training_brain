@@ -53,7 +53,12 @@ class TPSyncResult:
 
 
 def sync_planned() -> TPSyncResult:
-    """Fetch TP iCal feed and upsert all events as planned workouts."""
+    """Fetch TP iCal feed and upsert all events as planned workouts.
+
+    Identity is the content-derived `dedup_key` (source | date | sport |
+    lowercased first line of description), not source_uid — TP regenerates
+    UIDs on every feed pull, so source_uid was never a stable identity.
+    """
     s = settings()
     if not s.tp_ical_url:
         raise RuntimeError("TP_ICAL_URL must be set in .env")
@@ -87,7 +92,7 @@ def sync_planned() -> TPSyncResult:
             if normalized:
                 db.table("workouts_planned").upsert(
                     normalized,
-                    on_conflict="athlete_id,source,source_uid",
+                    on_conflict="athlete_id,dedup_key",
                 ).execute()
                 result.upserted += 1
         except Exception as e:
@@ -128,18 +133,33 @@ def _normalize_event(component: Any, raw_id: int | None) -> dict[str, Any] | Non
     else:
         return None
 
+    sport = _infer_sport(summary, str(component.get("CATEGORIES") or ""))
+    full_description = f"{summary}\n{description}".strip()
+    source = "trainingpeaks"
+
     return {
         "athlete_id": athlete_id(),
         "date": d.isoformat(),
-        "sport": _infer_sport(summary, str(component.get("CATEGORIES") or "")),
+        "sport": sport,
         "duration_planned_s": _extract_duration_s(component),
         "tss_planned": _extract_tss(description),
-        "description": f"{summary}\n{description}".strip(),
+        "description": full_description,
         "structure": None,
-        "source": "trainingpeaks",
+        "source": source,
         "source_uid": uid,
         "raw_id": raw_id,
+        "dedup_key": _dedup_key(source, d, sport, full_description),
     }
+
+
+def _dedup_key(source: str, d: date, sport: str, description: str) -> str:
+    """Stable identity for a TP workout across iCal re-syncs.
+
+    Matches the unique constraint on (athlete_id, dedup_key). Must stay in
+    sync with the equivalent SQL expression used in migration 0008.
+    """
+    first_line = description.split("\n", 1)[0].strip().lower() if description else ""
+    return f"{source}|{d.isoformat()}|{sport}|{first_line}"
 
 
 def _extract_duration_s(component: Any) -> int | None:

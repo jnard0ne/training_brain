@@ -67,7 +67,8 @@ Single row per athlete. `id (uuid pk)`, `name`, `timezone` (IANA, e.g. `'America
 One row per TP iCal event.
 - `id`, `athlete_id`, `date` (planned local date), `sport` (enum: `swim`/`bike`/`run`/`strength`/`mobility`/`brick`/`other`)
 - `duration_planned_s`, `tss_planned`, `description` (free text from TP), `structure` (jsonb, usually null)
-- `source` (`'trainingpeaks'`), `source_uid` (iCal UID)
+- `source` (`'trainingpeaks'`), `source_uid` (iCal UID — informational; TP regenerates UIDs on every feed pull, so it's not stable identity)
+- `dedup_key` (content-derived stable identity used by the upsert: `source|date|sport|lowercased first line of description`)
 
 ### `workouts_executed`
 One row per real workout, deduped across Garmin/Strava.
