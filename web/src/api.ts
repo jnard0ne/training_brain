@@ -107,7 +107,6 @@ export type PlannedWorkout = {
   duration_planned_s: number | null;
   tss_planned: number | null;
   description: string;
-  compliance?: Compliance;
 };
 
 export type ExecutedWorkout = {
@@ -125,12 +124,40 @@ export type ExecutedWorkout = {
   relative_effort: number | null;
   garmin_activity_id: number | null;
   strava_activity_id: number | null;
-  compliance?: Compliance;
 };
+
+// A single calendar item. `completed` is a matched planned↔executed pair;
+// `planned` is a planned workout with no execution yet; `unplanned` is an
+// execution with no matching plan. The `id` field is the row to link to.
+export type WorkoutItem =
+  | {
+      kind: "completed";
+      id: string;
+      sport: Sport;
+      planned: PlannedWorkout;
+      executed: ExecutedWorkout;
+      compliance: Compliance | null;
+    }
+  | {
+      kind: "planned";
+      id: string;
+      sport: Sport;
+      planned: PlannedWorkout;
+      executed: null;
+      compliance: Compliance | null;
+    }
+  | {
+      kind: "unplanned";
+      id: string;
+      sport: Sport;
+      planned: null;
+      executed: ExecutedWorkout;
+      compliance: Compliance | null;
+    };
 
 export type CalendarPayload = {
   timezone: string;
   start: string;
   end: string;
-  days: Record<string, { planned: PlannedWorkout[]; executed: ExecutedWorkout[] }>;
+  days: Record<string, { items: WorkoutItem[] }>;
 };

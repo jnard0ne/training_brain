@@ -17,16 +17,8 @@ export function WeekRow({
     <div className="grid grid-cols-7 gap-2">
       {days.map((d) => {
         const iso = toIso(d);
-        const day = data?.days[iso] ?? { planned: [], executed: [] };
-        return (
-          <DayCell
-            key={iso}
-            date={d}
-            planned={day.planned}
-            executed={day.executed}
-            today={today}
-          />
-        );
+        const day = data?.days[iso] ?? { items: [] };
+        return <DayCell key={iso} date={d} items={day.items} today={today} />;
       })}
     </div>
   );

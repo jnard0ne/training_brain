@@ -1,15 +1,14 @@
-import type { ExecutedWorkout, PlannedWorkout } from "../../api";
+import type { WorkoutItem } from "../../api";
 import { sameDay } from "../../lib/dates";
-import { ExecutedCard, PlannedCard } from "./WorkoutCard";
+import { WorkoutItemCard } from "./WorkoutCard";
 
 type Props = {
   date: Date;
-  planned: PlannedWorkout[];
-  executed: ExecutedWorkout[];
+  items: WorkoutItem[];
   today: Date;
 };
 
-export function DayCell({ date, planned, executed, today }: Props) {
+export function DayCell({ date, items, today }: Props) {
   const isToday = sameDay(date, today);
 
   return (
@@ -28,18 +27,13 @@ export function DayCell({ date, planned, executed, today }: Props) {
             {date.getDate()}
           </span>
         </div>
-        {(planned.length > 0 || executed.length > 0) && (
-          <div className="text-[10px] text-muted">
-            {executed.length + planned.length}
-          </div>
+        {items.length > 0 && (
+          <div className="text-[10px] text-muted">{items.length}</div>
         )}
       </div>
       <div className="p-1.5 space-y-1.5">
-        {executed.map((w) => (
-          <ExecutedCard key={`e-${w.id}`} workout={w} />
-        ))}
-        {planned.map((w) => (
-          <PlannedCard key={`p-${w.id}`} workout={w} />
+        {items.map((item) => (
+          <WorkoutItemCard key={item.id} item={item} />
         ))}
       </div>
     </div>
