@@ -105,7 +105,7 @@ Open `.env` in your text editor and fill in the values:
 - `SUPABASE_URL` — from Supabase → **Project Settings → API**. Format: `https://<project-ref>.supabase.co`.
 - `SUPABASE_SECRET_KEY` — same page, under **API Keys**. Use the modern `sb_secret_…` key, not the legacy `service_role` JWT. Treat as a password.
 - `ATHLETE_ID` — the UUID you saved from step 3.
-- `GARMIN_EMAIL` and `GARMIN_PASSWORD` — your Garmin Connect login.
+- `GARMIN_EMAIL` and `GARMIN_PASSWORD` — your Garmin Connect login. Optional but recommended: with these set, the sync transparently refreshes the cached Garmin token when it expires and silently re-logs in when the refresh token dies, so cron survives token rotation. Without them, an expired session is a hard failure that needs manual re-auth.
 - `TP_ICAL_URL` — TrainingPeaks → **Settings → Account Settings → Sharing → Calendar Feed**. The URL is tokenized — treat it as a password.
 - (Optional) `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET`, `STRAVA_REFRESH_TOKEN` — only if you want Strava cross-checking. Leave blank to skip.
 
@@ -272,7 +272,9 @@ What's in the UI today:
 
 - **Garmin Connect** — email + password + MFA prompt; token files cached to
   `~/.garminconnect`. Shows "Last verified <time>" so you can tell when the
-  credentials were last confirmed working.
+  credentials were last confirmed working. On a successful login the
+  confirmed credentials are written back to `.env`, so cron's auto-refresh
+  keeps working after you change your Garmin password.
 - **TrainingPeaks** — paste a `webcal://` or `https://` iCal URL; the backend
   normalizes, saves to `.env`, and probes the feed (status line shows the
   current event count). Useful for swapping in a fresh personal link without
