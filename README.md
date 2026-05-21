@@ -270,19 +270,26 @@ cd web && npm run dev               # terminal 2 — :5173, proxies /api → :87
 
 What's in the UI today:
 
-- **Garmin Connect** — email + password + MFA prompt; token files cached to
-  `~/.garminconnect`. Shows "Last verified <time>" so you can tell when the
-  credentials were last confirmed working. On a successful login the
-  confirmed credentials are written back to `.env`, so cron's auto-refresh
-  keeps working after you change your Garmin password.
-- **TrainingPeaks** — paste a `webcal://` or `https://` iCal URL; the backend
-  normalizes, saves to `.env`, and probes the feed (status line shows the
-  current event count). Useful for swapping in a fresh personal link without
-  hand-editing `.env`.
-- **Strava** — OAuth round-trip; refresh token is written back into `.env`
-  on success and live-verified against Strava on every page load. Client
-  ID / secret can also be set or rotated from the UI. Strava's app settings
-  must list `localhost` as the Authorization Callback Domain.
+- **Calendar** (`/`, default landing) — week (default) and month views of
+  planned vs. executed workouts. Each day shows planned workouts as
+  dashed-outline cards and executed workouts as solid cards, both colored
+  by sport. Clicking any workout opens a placeholder detail page
+  (`/workouts/:id`) — full lap / mean-max / time-in-zone view comes later.
+- **Auth** (`/auth`) — three cards for re-authenticating your sources:
+  - **Garmin Connect** — email + password + MFA prompt; token files cached
+    to `~/.garminconnect`. Shows "Last verified <time>" so you can tell
+    when the credentials were last confirmed working. On a successful
+    login the confirmed credentials are written back to `.env`, so cron's
+    auto-refresh keeps working after you change your Garmin password.
+  - **TrainingPeaks** — paste a `webcal://` or `https://` iCal URL; the
+    backend normalizes, saves to `.env`, and probes the feed (status line
+    shows the current event count). Useful for swapping in a fresh
+    personal link without hand-editing `.env`.
+  - **Strava** — OAuth round-trip; refresh token is written back into
+    `.env` on success and live-verified against Strava on every page
+    load. Client ID / secret can also be set or rotated from the UI.
+    Strava's app settings must list `localhost` as the Authorization
+    Callback Domain.
 
 ---
 

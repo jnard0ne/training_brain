@@ -1,46 +1,53 @@
-import { useCallback, useEffect, useState } from "react";
-import { api, type OverallStatus } from "./api";
-import { GarminCard } from "./components/GarminCard";
-import { StravaCard } from "./components/StravaCard";
-import { TrainingPeaksCard } from "./components/TrainingPeaksCard";
+import { BrowserRouter, Link, NavLink, Route, Routes } from "react-router-dom";
+import AuthPage from "./pages/AuthPage";
+import CalendarPage from "./pages/CalendarPage";
+import WorkoutDetailPage from "./pages/WorkoutDetailPage";
 
 export default function App() {
-  const [status, setStatus] = useState<OverallStatus | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const refresh = useCallback(async () => {
-    try {
-      setStatus(await api.status());
-      setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }, []);
-
-  useEffect(() => {
-    refresh();
-  }, [refresh]);
-
   return (
-    <div className="min-h-screen p-6 sm:p-10 max-w-3xl mx-auto">
-      <header className="mb-8">
-        <h1 className="text-2xl font-semibold tracking-tight">training_brain</h1>
-        <p className="text-muted text-sm mt-1">
-          Connect your sources. Re-authenticate when sync fails.
-        </p>
-      </header>
-
-      {error && (
-        <div className="mb-6 rounded-lg border border-err/40 bg-err/10 px-4 py-3 text-sm">
-          Couldn't reach the backend: <span className="font-mono">{error}</span>
-        </div>
-      )}
-
-      <div className="space-y-4">
-        <GarminCard status={status?.garmin ?? null} onChange={refresh} />
-        <TrainingPeaksCard onChange={refresh} />
-        <StravaCard onChange={refresh} />
+    <BrowserRouter>
+      <div className="min-h-screen flex flex-col overflow-x-clip">
+        <TopNav />
+        <main className="flex-1 px-6 sm:px-10 py-6 max-w-7xl mx-auto w-full">
+          <Routes>
+            <Route path="/" element={<CalendarPage />} />
+            <Route path="/auth" element={<AuthPage />} />
+            <Route path="/workouts/:id" element={<WorkoutDetailPage />} />
+          </Routes>
+        </main>
       </div>
-    </div>
+    </BrowserRouter>
+  );
+}
+
+function TopNav() {
+  return (
+    <header className="border-b border-border bg-panel/40">
+      <div className="max-w-7xl mx-auto px-6 sm:px-10 h-12 flex items-center justify-between">
+        <Link to="/" className="font-medium tracking-tight">
+          training_brain
+        </Link>
+        <nav className="flex items-center gap-1 text-sm">
+          <NavTab to="/" label="Calendar" />
+          <NavTab to="/auth" label="Auth" />
+        </nav>
+      </div>
+    </header>
+  );
+}
+
+function NavTab({ to, label }: { to: string; label: string }) {
+  return (
+    <NavLink
+      to={to}
+      end
+      className={({ isActive }) =>
+        `px-3 py-1.5 rounded-md ${
+          isActive ? "bg-bg text-text" : "text-muted hover:text-text"
+        }`
+      }
+    >
+      {label}
+    </NavLink>
   );
 }

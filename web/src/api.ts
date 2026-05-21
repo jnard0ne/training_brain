@@ -89,4 +89,48 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ url }),
     }),
+  calendar: (start: string, end: string) =>
+    req<CalendarPayload>(
+      `/api/calendar?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`,
+    ),
+};
+
+export type Sport = "swim" | "bike" | "run" | "strength" | "mobility" | "brick" | "other";
+
+export type ComplianceStatus = "completed" | "uncompleted" | "unplanned";
+export type ComplianceLevel = "green" | "yellow" | "orange" | "red" | "grey";
+export type Compliance = { status: ComplianceStatus; level: ComplianceLevel };
+
+export type PlannedWorkout = {
+  id: string;
+  sport: Sport;
+  duration_planned_s: number | null;
+  tss_planned: number | null;
+  description: string;
+  compliance?: Compliance;
+};
+
+export type ExecutedWorkout = {
+  id: string;
+  sport: Sport;
+  started_at: string;
+  started_local: string;
+  duration_s: number | null;
+  distance_m: number | null;
+  tss: number | null;
+  avg_hr: number | null;
+  avg_power: number | null;
+  avg_pace_s_per_km: number | null;
+  elevation_gain_m: number | null;
+  relative_effort: number | null;
+  garmin_activity_id: number | null;
+  strava_activity_id: number | null;
+  compliance?: Compliance;
+};
+
+export type CalendarPayload = {
+  timezone: string;
+  start: string;
+  end: string;
+  days: Record<string, { planned: PlannedWorkout[]; executed: ExecutedWorkout[] }>;
 };

@@ -26,7 +26,9 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from training_brain.web import garmin_auth, strava_auth, trainingpeaks_auth
+from datetime import date
+
+from training_brain.web import calendar_data, garmin_auth, strava_auth, trainingpeaks_auth
 
 
 app = FastAPI(title="training_brain", docs_url="/api/docs")
@@ -189,6 +191,22 @@ def trainingpeaks_status() -> dict:
 def trainingpeaks_set_url(req: TrainingPeaksUrlRequest) -> dict:
     try:
         return trainingpeaks_auth.save_url(req.url)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+# ── Calendar ────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/calendar")
+def calendar_range(start: str, end: str) -> dict:
+    try:
+        start_d = date.fromisoformat(start)
+        end_d = date.fromisoformat(end)
+    except ValueError as e:
+        raise HTTPException(400, f"start and end must be YYYY-MM-DD: {e}") from e
+    try:
+        return calendar_data.range_payload(start_d, end_d)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
 
