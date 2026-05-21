@@ -12,6 +12,7 @@ concurrent logins aren't a concern.
 
 from __future__ import annotations
 
+import os
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -21,6 +22,7 @@ from typing import Literal
 from garminconnect import Garmin
 
 from training_brain.ingestion.garmin import GARMIN_TOKEN_PATH
+from training_brain.web.env_writer import write_keys
 
 
 LoginState = Literal["idle", "running", "needs_mfa", "success", "error"]
@@ -101,6 +103,10 @@ def _run_login(email: str, password: str, sess: _Session) -> None:
         # valid, so an mtime check alone makes a successful re-auth look like a
         # no-op. Touch the files so the UI reflects "verified as of now."
         _touch_tokens()
+        # Persist working credentials to .env so cron syncs can auto-refresh
+        # tokens when they expire. We only reach this branch on a confirmed
+        # successful login, so we know these credentials are valid.
+        _persist_credentials(email, password)
         with _lock:
             sess.state = "success"
     except Exception as e:
@@ -124,6 +130,25 @@ def _token_exists() -> bool:
 def _touch_tokens() -> None:
     for f in Path(GARMIN_TOKEN_PATH).expanduser().glob("*.json"):
         f.touch()
+
+
+def _persist_credentials(email: str, password: str) -> None:
+    """Write the working credentials to .env and refresh in-process env state.
+
+    Note: the cached settings() singleton in training_brain.db will already be
+    populated for this process — we update os.environ and clear the cache so
+    any subsequent _client_garmin() call in the same process sees the new
+    values. (In practice the web UI process doesn't run syncs, but this keeps
+    behavior coherent if that changes.)
+    """
+    write_keys({"GARMIN_EMAIL": email, "GARMIN_PASSWORD": password})
+    os.environ["GARMIN_EMAIL"] = email
+    os.environ["GARMIN_PASSWORD"] = password
+    try:
+        from training_brain.db import settings as _settings
+        _settings.cache_clear()
+    except Exception:
+        pass
 
 
 def token_mtime() -> str | None:

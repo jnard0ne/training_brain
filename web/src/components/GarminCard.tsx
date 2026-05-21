@@ -136,8 +136,9 @@ export function GarminCard({ status, onChange }: Props) {
                 />
               </Field>
               <p className="text-xs text-muted">
-                Credentials are sent only to your local backend, which uses them to log in
-                with Garmin and then discards them. Tokens cache to{" "}
+                On success, credentials are written to{" "}
+                <span className="font-mono">.env</span> so the scheduled sync can
+                auto-refresh the Garmin token when it expires. Tokens cache to{" "}
                 <span className="font-mono">~/.garminconnect</span>.
               </p>
               <button type="submit" disabled={busy} className="btn-primary">

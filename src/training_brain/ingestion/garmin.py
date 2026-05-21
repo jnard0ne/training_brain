@@ -97,16 +97,35 @@ def _client_garmin() -> Garmin:
     global _garmin
     if _garmin is not None:
         return _garmin
-    api = Garmin()
+    s = settings()
+    # Passing email/password to the constructor lets the library transparently
+    # refresh expired tokens (and full-relogin when refresh dies), so cron
+    # syncs survive token rotation without manual intervention. MFA still has
+    # no good unattended answer — fail loudly if Garmin ever requests it.
+    if s.garmin_email and s.garmin_password:
+        api = Garmin(
+            email=s.garmin_email,
+            password=s.garmin_password,
+            prompt_mfa=_unattended_mfa,
+        )
+    else:
+        api = Garmin()
     try:
         api.login(GARMIN_TOKEN_PATH)
     except Exception as e:
         raise RuntimeError(
-            "Garmin session is stale or missing. Run "
-            "`python -m training_brain.sync login-garmin` interactively first."
+            "Garmin session is stale or missing. Re-authenticate via "
+            "`training-brain web` (Garmin card) or `training-brain login-garmin`."
         ) from e
     _garmin = api
     return api
+
+
+def _unattended_mfa() -> str:
+    raise RuntimeError(
+        "Garmin is requesting MFA but no interactive prompt is available. "
+        "Re-authenticate via `training-brain web` to refresh the session."
+    )
 
 
 # ── Sync entry points ───────────────────────────────────────────────────────
